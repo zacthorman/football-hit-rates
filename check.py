@@ -29,7 +29,8 @@ TOMORROW = (date.today() + timedelta(days=1)).isoformat()
 OFFSET = 3600
 
 ESPANYOL = 2814
-KNOWN_EVENT = 16421053  # Espanyol v Levante, 16 Aug 2026
+KNOWN_EVENT = 16421053   # Espanyol v Levante, 16 Aug 2026
+KEEPER = 94527           # Marko Dmitrovic, a player id from your own data
 
 CANDIDATES = [
     # Controls. These worked earlier, so if they fail now something broader
@@ -66,6 +67,19 @@ CANDIDATES = [
 
     # Competition-level. Needed for --league, which reads a whole division's
     # team list off the league table instead of you typing twenty ids.
+    # Following a player across a transfer. If events/last works, a new
+    # signing can get real hit rates from their previous club. If only the
+    # season aggregates work, we can show averages but not a sequence.
+    f"player/{KEEPER}",
+    f"player/{KEEPER}/events/last/0",
+    f"player/{KEEPER}/statistics/seasons",
+    f"player/{KEEPER}/transfer-history",
+
+    # Pre-season. Friendlies usually carry no shot breakdown, but incidents
+    # holds goals, scorers, timings, cards and substitutions, which is most
+    # of what is worth knowing from a friendly.
+    f"event/{KNOWN_EVENT}/incidents",
+
     "unique-tournament/17/seasons",
     "unique-tournament/17",
     "unique-tournament/17/featured-events",

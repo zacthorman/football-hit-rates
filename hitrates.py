@@ -111,16 +111,34 @@ def _match_date(event: dict) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
 
 
+def _is_friendly(event: dict) -> bool:
+    name = event.get("tournament", {}).get("name", "").lower()
+    slug = event.get("tournament", {}).get("slug", "").lower()
+    return "friendly" in name or "friendly" in slug
+
+
 def collect_events(
     team_id: int,
     tournament_id: int | None = None,
     pages: int = 2,
+    min_matches: int = 5,
+    team_name: str = "",
+    verbose: bool = True,
 ) -> list[dict]:
     """Gather a team's finished matches, newest last.
 
     Filtering by tournament matters more than it looks. Pre-season friendlies
-    appear in the same feed but carry no detailed statistics, so leaving them
-    in produces empty rows and a much smaller sample than you think you have.
+    sit in the same feed with no detailed statistics, so leaving them in
+    produces empty rows and a much smaller sample than you think you have.
+
+    But a strict filter breaks badly in three common cases: a promoted or
+    relegated team has no history in their new division, and a cup tie has
+    almost no history in that cup. Cardiff went up from League One, so
+    filtering their form to the Championship returns nothing at all.
+
+    So the filter is preferred, not enforced. If it leaves too little to work
+    with, fall back to every competitive match and say so out loud, because a
+    sample drawn from a different division is worth knowing about.
     """
     events: list[dict] = []
     for page in range(pages):
@@ -137,17 +155,38 @@ def collect_events(
 
     unique.sort(key=lambda e: e.get("startTimestamp", 0))
 
-    def keep(event: dict) -> bool:
-        if event.get("status", {}).get("type") != "finished":
-            return False
-        if tournament_id is None:
-            return True
-        unique_tid = (
-            event.get("tournament", {}).get("uniqueTournament", {}).get("id")
-        )
-        return unique_tid == tournament_id
+    finished = [
+        e for e in unique
+        if e.get("status", {}).get("type") == "finished" and not _is_friendly(e)
+    ]
 
-    return [e for e in unique if keep(e)]
+    if tournament_id is None:
+        return finished
+
+    in_competition = [
+        e for e in finished
+        if e.get("tournament", {}).get("uniqueTournament", {}).get("id")
+        == tournament_id
+    ]
+
+    if len(in_competition) >= min_matches:
+        return in_competition
+
+    if verbose:
+        label = f"{team_name}: " if team_name else ""
+        others = {}
+        for e in finished[-10:]:
+            name = e.get("tournament", {}).get("name", "?")
+            others[name] = others.get(name, 0) + 1
+        mix = ", ".join(f"{n} {c}" for c, n in sorted(others.items(), key=lambda x: -x[1]))
+        print(
+            f"    {label}only {len(in_competition)} match(es) in this competition,"
+            f" using all competitive matches instead"
+        )
+        if mix:
+            print(f"      last 10 were: {mix}")
+
+    return finished
 
 
 def team_form(
@@ -162,8 +201,9 @@ def team_form(
     Each record holds the team's own value for every stat, plus who they
     played, where, and the score.
     """
-    events = collect_events(team_id, tournament_id)
-    events = events[-limit:]
+    events = collect_events(
+        team_id, tournament_id, team_name=team_name, verbose=verbose
+    )[-limit:]
 
     if verbose:
         print(f"  {team_name}: {len(events)} matches to fetch")
@@ -196,6 +236,7 @@ def team_form(
             {
                 "id": event_id,
                 "date": _match_date(event),
+                "competition": event.get("tournament", {}).get("name", "?"),
                 "opponent": opponent.get("shortName") or opponent.get("name", "?"),
                 "venue": "home" if is_home else "away",
                 "goals_for": goals_for,
@@ -301,7 +342,9 @@ def player_form(
     player per game, rather than one row per game. Grouping happens later,
     which keeps the venue and last-N filters working the same way.
     """
-    events = collect_events(team_id, tournament_id)[-limit:]
+    events = collect_events(
+        team_id, tournament_id, team_name=team_name, verbose=verbose
+    )[-limit:]
 
     if verbose:
         print(f"  {team_name}: player stats from {len(events)} matches")
@@ -445,6 +488,7 @@ def _record_from_event(
     return {
         "id": event["id"],
         "date": _match_date(event),
+        "competition": event.get("tournament", {}).get("name", "?"),
         "opponent": opponent.get("shortName") or opponent.get("name", "?"),
         "venue": "home" if is_home else "away",
         "goals_for": goals_for,

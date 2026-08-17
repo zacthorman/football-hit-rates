@@ -69,6 +69,13 @@ Useful flags: `--players` to include per-player stats, `--games 20` for a deeper
 
 **Players tab.** Present when you ran with `--players`. Pick a stat, set a line, set a minimum number of appearances, and both squads are ranked by hit rate. It respects the same last 5 / last 10 and home / away filters as the team tab, so "last 5 at home" means the same thing in both.
 
+**Standout lines tab.** Scans every combination of fixture, team, stat, period and venue split, and ranks what comes out. Two things make it honest rather than a fruit machine:
+
+- It ranks by the lower bound of a 95% confidence interval, not by raw percentage. That matters because 5/5 is 100% and 18/20 is 90%, yet the second is far stronger evidence. Ranking by percentage puts the flukes on top; this puts them where they belong.
+- It tells you how many combinations it scanned, and roughly how many would look that consistent from chance alone. Scan 1,400 combinations at ten matches each and about 15 will reach 9/10 by luck. Without that number, a list of "strong" lines is indistinguishable from a list of coincidences.
+
+Treat it as a shortlist to price up. A hit rate is not an edge: what makes a bet worth taking is the price being wrong, and there is no odds feed here to tell you that. The suggested lines are also derived from the same matches being measured, which flatters every number in the table.
+
 **Sample.** Recent form, or head to head. Head to head is the same layout over previous meetings between these two teams instead of their recent matches, with its own suggested lines, since two teams meeting each other produce different numbers from their form against everyone else. Needs `--h2h` when building.
 
 **Layout.** Each stat is one row with the two teams facing each other around the stat name, so the comparison is a single glance. On a phone the same row stacks into a card. **Main** shows the seven stats worth most attention; **All** shows everything the endpoint returned. **Strongest first** sorts by distance from an even split, and **Strong only** keeps just the rows where a team is at 80% or above, or 20% or below. Those rows are also shaded.

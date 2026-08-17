@@ -265,6 +265,21 @@ select, .num-input {
 .pcell { display: flex; align-items: center; gap: 14px; }
 
 .note { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; }
+.caution {
+  border: 1px solid var(--border); border-left: 3px solid var(--miss);
+  background: var(--surface-1); border-radius: 10px;
+  padding: 13px 16px; margin: 0 0 16px;
+  font-size: 13.5px; color: var(--text-secondary);
+}
+.caution strong { color: var(--text-primary); }
+.pill {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 620; letter-spacing: 0.02em;
+  border: 1px solid var(--border); color: var(--text-secondary);
+  white-space: nowrap;
+}
+.dir { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chance { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 
 .tooltip {
   position: fixed; pointer-events: none;
@@ -423,8 +438,9 @@ function sparkline(rows, statName, line, colorVar, w) {
      the team's colour, so identity is still carried. */
   const dots = points.map((p, i) => {
     const hit = p.v > line;
+    const comp = p.r.competition ? ` &middot; ${p.r.competition}` : "";
     const tipText = `${p.r.date} ${p.r.venue === 'home' ? 'H' : 'A'} v ${p.r.opponent}`
-      + ` &middot; ${p.v} &middot; ${hit ? 'over' : 'under'} ${line}`;
+      + ` &middot; ${p.v} &middot; ${hit ? 'over' : 'under'} ${line}${comp}`;
     return hit
       ? `<circle cx="${x(i)}" cy="${y(p.v)}" r="4" fill="var(--hit)"
            stroke="var(--surface-1)" stroke-width="1.5"
@@ -581,6 +597,174 @@ function updateSample() {
             .join(" \\u00b7 ") + ".";
 }
 
+/* --------------------------------------------------------------- standout
+
+   Ranking by raw hit rate is the obvious approach and it is wrong, because
+   5/5 outranks 18/20 while being far weaker evidence. These two functions
+   fix that.
+
+   wilsonLow gives the bottom of a 95% confidence interval, so a small
+   sample is penalised for being small: 5/5 scores 0.57, 10/10 scores 0.72,
+   20/20 scores 0.84. Ranking by it puts durable records above lucky ones.
+
+   binomTail answers the question that actually matters: if this stat were a
+   coin flip, how often would a record this good turn up anyway? Scanning
+   1,400-odd combinations at ten matches each, roughly 15 will reach 9/10 by
+   chance alone. Without that number on screen, a list of "strong" lines is
+   indistinguishable from a list of flukes. */
+
+function wilsonLow(k, n, z) {
+  if (!n) return 0;
+  z = z || 1.96;
+  const p = k / n;
+  const d = 1 + (z * z) / n;
+  const centre = p + (z * z) / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return (centre - margin) / d;
+}
+
+function binomTail(n, k) {
+  // P(X >= k) for n fair coin flips, computed in logs to stay accurate.
+  const logFact = [0];
+  for (let i = 1; i <= n; i++) logFact[i] = logFact[i - 1] + Math.log(i);
+  let total = 0;
+  for (let i = k; i <= n; i++) {
+    total += Math.exp(
+      logFact[n] - logFact[i] - logFact[n - i] + n * Math.log(0.5)
+    );
+  }
+  return total;
+}
+
+const VENUE_SPLITS = [
+  { key: "all", label: "All matches" },
+  { key: "home", label: "At home" },
+  { key: "away", label: "Away" },
+];
+
+function scanLines(minSample) {
+  const found = [];
+  let combos = 0;
+
+  ALL.fixtures.forEach((fx, fxIndex) => {
+    Object.keys(fx.lines || {}).forEach(per => {
+      const lines = fx.lines[per] || {};
+      (fx.stats[per] || []).forEach(name => {
+        const line = lines[name];
+        if (line === undefined) return;
+
+        fx.records.forEach((records, teamIndex) => {
+          // Best split per team/stat/period, so one pattern is one row
+          // rather than three near-identical ones.
+          let best = null;
+
+          VENUE_SPLITS.forEach(split => {
+            let rows = records;
+            if (split.key !== "all") rows = rows.filter(r => r.venue === split.key);
+            rows = rows.slice(-games);
+
+            const vals = rows
+              .map(r => (r.stats[per] || {})[name])
+              .filter(v => v !== undefined && v !== null);
+
+            if (vals.length < minSample) return;
+            combos++;
+
+            const over = vals.filter(v => v > line).length;
+            const under = vals.length - over;
+            const goingOver = over >= under;
+            const k = goingOver ? over : under;
+
+            const score = wilsonLow(k, vals.length);
+            if (!best || score > best.score) {
+              best = {
+                score,
+                k, n: vals.length,
+                over: goingOver,
+                chance: binomTail(vals.length, k),
+                split: split.label,
+                vals,
+              };
+            }
+          });
+
+          if (best) {
+            found.push(Object.assign(best, {
+              fixture: `${fx.fixture.home} v ${fx.fixture.away}`,
+              fixtureIndex: fxIndex,
+              team: fx.teams[teamIndex].name,
+              teamIndex,
+              stat: name,
+              period: per,
+              line,
+            }));
+          }
+        });
+      });
+    });
+  });
+
+  found.sort((a, b) => b.score - a.score);
+  return { found, combos };
+}
+
+function standoutView() {
+  const minSample = parseInt(document.getElementById("smin").value, 10) || 6;
+  const limit = parseInt(document.getElementById("stop").value, 10) || 20;
+
+  const { found, combos } = scanLines(minSample);
+  const shown = found.slice(0, limit);
+
+  const periodName = p => (ALL.periods && ALL.periods[p]) || p;
+
+  if (!shown.length) {
+    document.getElementById("standout").innerHTML =
+      '<p class="empty">Nothing met the minimum sample. Lower it, or build with more matches.</p>';
+    return;
+  }
+
+  // How many of the scanned combinations would reach the weakest shown
+  // record purely by chance? This is the number that keeps you honest.
+  const weakest = shown[shown.length - 1];
+  const expected = combos * binomTail(weakest.n, weakest.k);
+
+  const rows = shown.map(r => `
+    <tr>
+      <td class="player-name">${r.stat}
+        <span class="pos">${periodName(r.period)}</span></td>
+      <td class="dir">${r.over ? "Over" : "Under"} ${r.line}</td>
+      <td>
+        <div><span class="pct">${Math.round((r.k / r.n) * 100)}%</span>
+             <span class="frac">${r.k}/${r.n}</span></div>
+        <div class="bar"><div class="fill" style="width:${(r.k / r.n) * 100}%;
+             background:var(${VARS[r.teamIndex]})"></div></div>
+      </td>
+      <td class="num" data-label="Team">${r.team}</td>
+      <td class="num" data-label="Split"><span class="pill">${r.split}</span></td>
+      <td class="num" data-label="Fixture">${r.fixture}</td>
+      <td class="chance" data-label="By chance">${(r.chance * 100).toFixed(1)}%</td>
+    </tr>`).join("");
+
+  document.getElementById("standout").innerHTML = `
+    <div class="caution">
+      <strong>Read this before using any of it.</strong>
+      This scan looked at <strong>${combos}</strong> combinations of fixture, team,
+      stat, period and venue. Of those, roughly <strong>${expected.toFixed(0)}</strong>
+      would look at least this consistent even if every one of them were a coin flip.
+      The list below is therefore a shortlist to price up, not a set of findings.
+      A hit rate is not an edge: the only thing that makes a bet worth taking is the
+      price being wrong, and there is no odds feed here to tell you that.
+      The lines are also derived from these same matches, which flatters them.
+    </div>
+    <div class="board"><table class="ptable">
+      <thead><tr>
+        <th>Stat</th><th>Line</th><th>Record</th><th>Team</th>
+        <th>Split</th><th>Fixture</th><th>By chance</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
 /* ---------------------------------------------------------------- players */
 
 function playerView() {
@@ -727,6 +911,7 @@ function applyFixture() {
   fillPlayerStats();
   render();
   if (tab === "players") playerView();
+  if (tab === "standout") standoutView();
 }
 
 function switchTab(target) {
@@ -736,6 +921,7 @@ function switchTab(target) {
   document.querySelectorAll(".panel").forEach(p =>
     p.hidden = p.dataset.panel !== target);
   if (target === "players") playerView();
+  if (target === "standout") standoutView();
 }
 
 /* ---------------------------------------------------------------- wiring */
@@ -804,7 +990,12 @@ function segment(attr, apply) {
   });
 }
 
-segment("games", v => { games = parseInt(v, 10); render(); if (tab === "players") playerView(); });
+segment("games", v => {
+  games = parseInt(v, 10);
+  render();
+  if (tab === "players") playerView();
+  if (tab === "standout") standoutView();
+});
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
 segment("period", v => { period = v; render(); });
 segment("source", v => { source = v; render(); });
@@ -865,6 +1056,14 @@ pstat.addEventListener("change", () => {
 });
 document.getElementById("pline").addEventListener("input", playerViewSoon);
 document.getElementById("pmin").addEventListener("input", playerViewSoon);
+
+let standoutTimer = null;
+function standoutSoon() {
+  clearTimeout(standoutTimer);
+  standoutTimer = setTimeout(standoutView, 140);
+}
+document.getElementById("smin").addEventListener("input", standoutSoon);
+document.getElementById("stop").addEventListener("input", standoutSoon);
 
 applyFixture();
 """
@@ -973,6 +1172,7 @@ def build_html(payload: dict) -> str:
 <div class="tabs" role="tablist">
   <button type="button" data-tab="team" aria-selected="true">Team stats</button>
   <button type="button" data-tab="players" aria-selected="false">Players</button>
+  <button type="button" data-tab="standout" aria-selected="false">Standout lines</button>
 </div>
 
 <div class="panel" data-panel="team">
@@ -1001,6 +1201,22 @@ def build_html(payload: dict) -> str:
     Players who have left the club are excluded.
   </p>
   <div id="players"></div>
+</div>
+
+<div class="panel" data-panel="standout" hidden>
+  <div class="controls">
+    <div class="control-group">
+      <span class="control-label">Min matches</span>
+      <input class="num-input" id="smin" type="number" step="1" min="3" value="8"
+             aria-label="Minimum matches">
+    </div>
+    <div class="control-group">
+      <span class="control-label">Show</span>
+      <input class="num-input" id="stop" type="number" step="5" min="5" value="20"
+             aria-label="How many to show">
+    </div>
+  </div>
+  <div id="standout"></div>
 </div>
 
 <footer>

@@ -1,0 +1,13 @@
+# Impersonates Chrome's TLS fingerprint, which is what gets you past
+# Cloudflare's first check on protected endpoints.
+curl_cffi>=0.7.0
+
+pandas>=2.0.0
+
+# Only needed if you want to work in the notebook.
+ipykernel>=6.0.0
+
+# Optional. Wraps eight football data sources (FBref, Understat, SofaScore,
+# WhoScored, ClubElo, ESPN, SoFIFA, football-data.co.uk) and returns pandas
+# frames. Worth a look when you want data this project doesn't cover.
+# soccerdata>=1.9.0

@@ -1,0 +1,21 @@
+# Virtual environment. Never commit this: it is thousands of files, it is
+# specific to your machine, and requirements.txt already describes it.
+.venv/
+
+# Cached API responses. Regenerable, and they would bloat the repo fast.
+# If you ever want to share a dataset, zip the folder rather than commit it.
+cache/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Scratch output from the notebook. Delete this line if you want to keep it.
+live_matches.csv
+
+# Reports ARE committed, because they are what GitHub Pages serves.
+# If you would rather keep them out of the repo, uncomment this:
+# reports/

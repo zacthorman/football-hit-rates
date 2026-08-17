@@ -37,7 +37,7 @@ python run.py --team 2814 --pick 0,1,2
 python run.py --teams 2814,2833,2817 --players
 
 # A whole division's next round
-python run.py --league premier_league --players
+python run.py --league premier_league --players --h2h
 ```
 
 `--league` reads the team list off the league table, so you don't have to know twenty ids, then collapses each team's next fixture into a round. Known names: `premier_league`, `championship`, `la_liga`, `serie_a`, `bundesliga`, `ligue_1`, `champions_league`, `europa_league`. Any other competition works by passing its uniqueTournament id.
@@ -51,6 +51,7 @@ Roughly, per fixture:
 | | Requests | Time |
 |---|---|---|
 | Team stats only | about 25 | 40 seconds |
+| With `--h2h` | about 35 | 55 seconds |
 | With `--players` | about 45 | 75 seconds |
 
 So five fixtures with players is around 220 requests and six minutes, which is comfortably within what SofaScore will tolerate at a 1 to 2 second delay. Two things make it cheaper than that arithmetic suggests:
@@ -68,9 +69,15 @@ Useful flags: `--players` to include per-player stats, `--games 20` for a deeper
 
 **Players tab.** Present when you ran with `--players`. Pick a stat, set a line, set a minimum number of appearances, and both squads are ranked by hit rate. It respects the same last 5 / last 10 and home / away filters as the team tab, so "last 5 at home" means the same thing in both.
 
+**Sample.** Recent form, or head to head. Head to head is the same layout over previous meetings between these two teams instead of their recent matches, with its own suggested lines, since two teams meeting each other produce different numbers from their form against everyone else. Needs `--h2h` when building.
+
+**Layout.** Each stat is one row with the two teams facing each other around the stat name, so the comparison is a single glance. On a phone the same row stacks into a card. **Main** shows the seven stats worth most attention; **All** shows everything the endpoint returned. **Strongest first** sorts by distance from an even split, and **Strong only** keeps just the rows where a team is at 80% or above, or 20% or below. Those rows are also shaded.
+
+**The dots** are colour-coded against the line: a filled green dot is over, a hollow red one is under. Colour is not carrying that alone, since position relative to the dashed line and the fill state say the same thing, which keeps it readable in greyscale and for red-green colour blindness.
+
 **Period.** Full match, first half or second half. Each period keeps its own lines, because a first-half shots line has nothing to do with a full-match one, and its own hit rates and charts. The halves come straight from SofaScore rather than being derived, since summing the halves does not reliably reproduce the full-match figure.
 
-Player stats are full match only. SofaScore doesn't publish per-player numbers by half.
+Player stats are full match only, since SofaScore doesn't publish per-player numbers by half. Players who have left the club are excluded automatically: the squad is read fresh, so a striker sold in July no longer shows up with last season's shot record. New signings appear once they have minutes, and the terminal reports how many squad members have none yet.
 
 Hovering any point on a chart gives you the date, opponent and value.
 

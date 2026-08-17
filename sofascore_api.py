@@ -258,9 +258,31 @@ def team_events(team_id: int, page: int = 0) -> list[dict]:
     return (data or {}).get("events", [])
 
 
+def team_squad(team_id: int) -> list[dict]:
+    """The team's current squad.
+
+    Needed because a "last 10 matches" sample straddles the transfer window.
+    Without this you get last season's departed striker sitting near the top
+    of the shots table, which is worse than useless: it looks like a finding.
+    """
+    data = get_json(f"team/{team_id}/players", max_age_hours=24)
+    players = (data or {}).get("players", [])
+    return [p.get("player", p) for p in players if isinstance(p, dict)]
+
+
+def squad_player_ids(team_id: int) -> set[int]:
+    return {p["id"] for p in team_squad(team_id) if isinstance(p.get("id"), int)}
+
+
 def event_statistics(event_id: int) -> dict | None:
     """Team-level match stats: shots, corners, offsides, throw-ins, cards."""
     return get_json(f"event/{event_id}/statistics")
+
+
+def h2h_events(event_id: int) -> list[dict]:
+    """Previous meetings between the two teams in this fixture."""
+    data = get_json(f"event/{event_id}/h2h/events", max_age_hours=168)
+    return (data or {}).get("events", [])
 
 
 def event_lineups(event_id: int) -> dict | None:

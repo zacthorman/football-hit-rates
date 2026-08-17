@@ -293,6 +293,7 @@ def player_form(
     tournament_id: int | None = None,
     limit: int = 10,
     verbose: bool = True,
+    current_squad_only: bool = True,
 ) -> list[dict]:
     """One record per player per match, for a team's recent matches.
 
@@ -304,6 +305,17 @@ def player_form(
 
     if verbose:
         print(f"  {team_name}: player stats from {len(events)} matches")
+
+    # A "last 10" sample straddles the transfer window, so it contains
+    # players who have since left. Their numbers are real but useless: a
+    # departed striker's shot record tells you nothing about Saturday.
+    squad: set[int] | None = None
+    if current_squad_only:
+        squad = api.squad_player_ids(team_id)
+        if not squad:
+            squad = None
+            if verbose:
+                print("    couldn't read the squad, keeping everyone who played")
 
     records = []
     for i, event in enumerate(events, start=1):
@@ -320,11 +332,17 @@ def player_form(
 
         players = lineups.get(side, {}).get("players", [])
         kept = 0
+        departed = 0
 
         for entry in players:
             raw = entry.get("statistics") or {}
             if not raw:
                 # Unused substitute. No stats at all, so not a zero, an absence.
+                continue
+
+            person_id = entry.get("player", {}).get("id")
+            if squad is not None and person_id not in squad:
+                departed += 1
                 continue
 
             values = {}
@@ -354,7 +372,17 @@ def player_form(
             kept += 1
 
         if verbose:
-            print(f"    {i}/{len(events)} {event_id} {kept} players")
+            note = f", {departed} since left" if departed else ""
+            print(f"    {i}/{len(events)} {event_id} {kept} players{note}")
+
+    if squad is not None and verbose:
+        seen = {r["player_id"] for r in records}
+        new_signings = squad - seen
+        if new_signings:
+            print(
+                f"    {len(new_signings)} squad member(s) have no minutes in this"
+                " sample (new signings or unused)"
+            )
 
     return records
 
@@ -395,6 +423,87 @@ def suggest_player_lines(
         lines[name] = max(0.5, round(median) - 0.5)
 
     return lines
+
+
+def _record_from_event(
+    event: dict,
+    team_id: int,
+    match_stats: dict[str, dict[str, tuple[float, float]]],
+) -> dict:
+    """One team's view of one match. Shared by form and head to head."""
+    is_home = event.get("homeTeam", {}).get("id") == team_id
+    opponent = (event.get("awayTeam") if is_home else event.get("homeTeam")) or {}
+
+    home_score = event.get("homeScore", {}).get("current", 0)
+    away_score = event.get("awayScore", {}).get("current", 0)
+    goals_for, goals_against = (
+        (home_score, away_score) if is_home else (away_score, home_score)
+    )
+
+    own_index = 0 if is_home else 1
+
+    return {
+        "id": event["id"],
+        "date": _match_date(event),
+        "opponent": opponent.get("shortName") or opponent.get("name", "?"),
+        "venue": "home" if is_home else "away",
+        "goals_for": goals_for,
+        "goals_against": goals_against,
+        "result": (
+            "W" if goals_for > goals_against
+            else "D" if goals_for == goals_against
+            else "L"
+        ),
+        "stats": {
+            period: {name: values[own_index] for name, values in bucket.items()}
+            for period, bucket in match_stats.items()
+        },
+    }
+
+
+def head_to_head(
+    event_id: int,
+    home_id: int,
+    away_id: int,
+    limit: int = 10,
+    verbose: bool = True,
+) -> list[list[dict]]:
+    """Previous meetings between these two teams, as two record lists.
+
+    Same shape as team_form's output, so the report can render head to head
+    with exactly the same code as recent form.
+
+    No competition filter here on purpose: when these two meet in a cup, that
+    is still a meeting between them, and the sample is small enough already.
+    """
+    events = api.h2h_events(event_id)
+    events = [e for e in events if e.get("status", {}).get("type") == "finished"]
+    events.sort(key=lambda e: e.get("startTimestamp", 0))
+    events = events[-limit:]
+
+    if verbose:
+        print(f"  head to head: {len(events)} previous meeting(s)")
+
+    home_records, away_records = [], []
+
+    for i, event in enumerate(events, start=1):
+        match_stats = extract_match_stats(api.event_statistics(event["id"]))
+        if not match_stats:
+            if verbose:
+                print(f"    {i}/{len(events)} {event['id']} no statistics")
+            continue
+        home_records.append(_record_from_event(event, home_id, match_stats))
+        away_records.append(_record_from_event(event, away_id, match_stats))
+        if verbose:
+            print(
+                f"    {i}/{len(events)} {_match_date(event)}"
+                f" {event.get('homeTeam', {}).get('shortName', '?')}"
+                f" {event.get('homeScore', {}).get('current', 0)}-"
+                f"{event.get('awayScore', {}).get('current', 0)}"
+                f" {event.get('awayTeam', {}).get('shortName', '?')}"
+            )
+
+    return [home_records, away_records]
 
 
 def stat_names(*record_lists: list[dict]) -> dict[str, list[str]]:

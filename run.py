@@ -9,7 +9,7 @@ Build a fixture hit-rate report.
     python run.py --teams 2814,2833,2817        each team's next fixture
     python run.py --league premier_league       the whole next round
 
-Add --players for per-player stats.
+Add --players for per-player stats, --h2h for previous meetings.
 
 One report can hold several fixtures with a dropdown to switch between them.
 Teams in the same league share matches, and everything is cached, so the
@@ -72,16 +72,45 @@ def list_fixtures(events: list[dict], team_name: str) -> None:
     print("\nRe-run with --pick N to build a report.\n")
 
 
-def team_next_fixture(team_id: int) -> dict | None:
-    """That team's next scheduled match, or their last one if none is set."""
+def team_next_fixture(team_id: int, tournament_id: int | None = None) -> dict | None:
+    """That team's next match, preferring one in the given competition.
+
+    Without the competition filter this returns whatever they play next,
+    which in August is often a European qualifier rather than a league game.
+    That matters twice over: you get the wrong fixture, and because the
+    fixture's competition drives the history filter, you also get both
+    teams' form in that competition only, which is a handful of matches.
+    """
     upcoming = api.team_next_events(team_id)
+
+    if tournament_id is not None:
+        in_competition = [
+            e for e in upcoming
+            if e.get("tournament", {}).get("uniqueTournament", {}).get("id")
+            == tournament_id
+        ]
+        if in_competition:
+            return in_competition[0]
+        # Nothing scheduled in that competition. Say so rather than silently
+        # substituting a cup tie.
+        if upcoming:
+            other = upcoming[0].get("tournament", {}).get("name", "?")
+            print(
+                f"    team {team_id}: no upcoming fixture in this competition,"
+                f" next is {other}. Skipped."
+            )
+        return None
+
     if upcoming:
         return upcoming[0]
+
     near = api.team_near_events(team_id)
     return near.get("nextEvent") or near.get("previousEvent")
 
 
-def build_fixture(event: dict, games: int, players: bool) -> dict | None:
+def build_fixture(
+    event: dict, games: int, players: bool, h2h: bool = False
+) -> dict | None:
     """Gather everything the report needs for one fixture."""
     home = event["homeTeam"]
     away = event["awayTeam"]
@@ -132,6 +161,20 @@ def build_fixture(event: dict, games: int, players: bool) -> dict | None:
         "lines": lines,
     }
 
+    if h2h:
+        h2h_records = hitrates.head_to_head(
+            event_id=event["id"], home_id=home["id"], away_id=away["id"], limit=games
+        )
+        if any(h2h_records):
+            entry["h2h"] = h2h_records
+            # H2H needs its own lines: two teams meeting each other produce
+            # different numbers from their form against everyone else.
+            h2h_names = hitrates.stat_names(*h2h_records)
+            entry["h2hStats"] = h2h_names
+            entry["h2hLines"] = hitrates.suggest_lines(h2h_records, h2h_names)
+        else:
+            print("  no head to head data, skipping that view")
+
     if players:
         print("  player stats:")
         player_records = [
@@ -153,11 +196,14 @@ def build_fixture(event: dict, games: int, players: bool) -> dict | None:
     return entry
 
 
-def build(events: list[dict], games: int, open_browser: bool, players: bool) -> Path:
+def build(
+    events: list[dict], games: int, open_browser: bool,
+    players: bool, h2h: bool = False,
+) -> Path:
     fixtures = []
     for i, event in enumerate(events, start=1):
         print(f"\n[{i}/{len(events)}]", end="")
-        entry = build_fixture(event, games, players)
+        entry = build_fixture(event, games, players, h2h)
         if entry:
             fixtures.append(entry)
 
@@ -298,6 +344,8 @@ def demo() -> Path:
     def one(home: str, away: str) -> dict:
         matches = [make_matches(1.15), make_matches(0.9)]
         names = hitrates.stat_names(*matches)
+        meetings = [make_matches(1.05)[:6], make_matches(0.95)[:6]]
+        h2h_names = hitrates.stat_names(*meetings)
         players = [make_players(SQUADS[home], matches[0]),
                    make_players(SQUADS[away], matches[1])]
         pnames = hitrates.player_stat_names(*players)
@@ -316,6 +364,9 @@ def demo() -> Path:
             "players": players,
             "playerStats": pnames,
             "playerLines": hitrates.suggest_player_lines(players, pnames),
+            "h2h": meetings,
+            "h2hStats": h2h_names,
+            "h2hLines": hitrates.suggest_lines(meetings, h2h_names),
         }
 
     fixtures = [one("Espanyol", "Levante UD"), one("Getafe", "Rayo Vallecano")]
@@ -358,6 +409,10 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=10, help="matches per team")
     parser.add_argument("--show", type=int, default=5, help="how many fixtures to list")
     parser.add_argument(
+        "--h2h", action="store_true",
+        help="also fetch previous meetings between the two teams",
+    )
+    parser.add_argument(
         "--players", action="store_true",
         help="also fetch per-player stats (one extra request per match)",
     )
@@ -372,6 +427,8 @@ def main() -> None:
     if args.search:
         do_search(args.search)
         return
+
+    league_filter = None
 
     # A whole competition: read the team list off the league table, then
     # take each team's next fixture. Two teams playing each other collapse
@@ -401,6 +458,7 @@ def main() -> None:
             )
         print(f"  {len(ids)} teams")
         args.teams = ",".join(str(i) for i in ids)
+        league_filter = tournament_id
 
     # Several teams: take each one's next fixture, de-duplicated in case two
     # of them happen to be playing each other.
@@ -408,9 +466,10 @@ def main() -> None:
         ids = [int(x.strip()) for x in args.teams.split(",") if x.strip()]
         events, seen = [], set()
         for team_id in ids:
-            event = team_next_fixture(team_id)
+            event = team_next_fixture(team_id, league_filter)
             if not event:
-                print(f"  no fixture found for team {team_id}")
+                if league_filter is None:
+                    print(f"  no fixture found for team {team_id}")
                 continue
             if event["id"] in seen:
                 continue
@@ -424,7 +483,7 @@ def main() -> None:
         for event in events:
             print(f"  {describe(event)}")
 
-        build(events, args.games, not args.no_open, args.players)
+        build(events, args.games, not args.no_open, args.players, args.h2h)
         return
 
     if args.team is None:
@@ -445,7 +504,8 @@ def main() -> None:
         return
 
     picks = parse_picks(args.pick, len(events))
-    build([events[i] for i in picks], args.games, not args.no_open, args.players)
+    build([events[i] for i in picks], args.games, not args.no_open,
+          args.players, args.h2h)
 
 
 if __name__ == "__main__":

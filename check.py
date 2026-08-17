@@ -56,6 +56,14 @@ CANDIDATES = [
     f"team/{ESPANYOL}/near-events",
     f"team/{ESPANYOL}",
 
+    # Current squad. Used to drop players who have since been sold, so the
+    # player tables reflect this season's squad rather than last season's.
+    f"team/{ESPANYOL}/players",
+
+    # Head to head: previous meetings between the two teams in a fixture.
+    f"event/{KNOWN_EVENT}/h2h",
+    f"event/{KNOWN_EVENT}/h2h/events",
+
     # Competition-level. Needed for --league, which reads a whole division's
     # team list off the league table instead of you typing twenty ids.
     "unique-tournament/17/seasons",

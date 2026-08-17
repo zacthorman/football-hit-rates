@@ -231,6 +231,7 @@ def team_form(
         # Index 0 is the home value, index 1 the away value. This single
         # line is where a mistake would silently swap both teams' numbers.
         own_index = 0 if is_home else 1
+        opp_index = 1 - own_index
 
         records.append(
             {
@@ -250,6 +251,13 @@ def team_form(
                 "stats": {
                     period: {
                         name: values[own_index] for name, values in bucket.items()
+                    }
+                    for period, bucket in match_stats.items()
+                },
+                # And what the opposition managed against them.
+                "against": {
+                    period: {
+                        name: values[opp_index] for name, values in bucket.items()
                     }
                     for period, bucket in match_stats.items()
                 },
@@ -484,6 +492,7 @@ def _record_from_event(
     )
 
     own_index = 0 if is_home else 1
+    opp_index = 1 - own_index
 
     return {
         "id": event["id"],
@@ -500,6 +509,12 @@ def _record_from_event(
         ),
         "stats": {
             period: {name: values[own_index] for name, values in bucket.items()}
+            for period, bucket in match_stats.items()
+        },
+        # What the opposition managed against them. Same payload, other index,
+        # so "corners against" costs nothing extra to collect.
+        "against": {
+            period: {name: values[opp_index] for name, values in bucket.items()}
             for period, bucket in match_stats.items()
         },
     }

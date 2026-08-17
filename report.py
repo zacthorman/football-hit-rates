@@ -342,6 +342,8 @@ let scope = "core";
 let sort = "default";
 let strongOnly = false;
 let source = "form";      // "form" = recent matches, "h2h" = previous meetings
+let measure = "for";      // "for" | "against" | "matchup"
+let showPast = false;
 
 // A hit rate this far from an even split is worth your attention. Below it,
 // ten matches simply cannot separate signal from noise.
@@ -399,28 +401,49 @@ function hasPlayers() {
 }
 
 /* Team records store stats as {period: {name: value}}. Player records are
-   flat, because SofaScore only reports player numbers for the whole match. */
-function statValue(record, statName) {
-  const bucket = record.stats[period] || record.stats;
+   flat, because SofaScore only reports player numbers for the whole match.
+
+   Every record also carries an `against` block: what the opposition managed
+   in that match. It comes from the same payload at no extra cost, and it is
+   what lets you ask the question that actually matters, which is whether one
+   team's attack meets the other team's leak. */
+function bucketFor(index) {
+  if (measure === "for") return "stats";
+  if (measure === "against") return "against";
+  return index === 0 ? "stats" : "against";   // matchup
+}
+
+function statValue(record, statName, which) {
+  const key = which || "stats";
+  const block = record[key];
+  // No silent fallback. An older report has no `against` block, and quietly
+  // showing the `for` numbers in its place would be indistinguishable from
+  // real data, which is worse than showing nothing.
+  if (!block) return undefined;
+  const bucket = block[period] || block;
   return bucket ? bucket[statName] : undefined;
 }
 
-function summarise(rows, statName, line) {
-  const vals = rows.map(r => statValue(r, statName))
+function hasAgainst() {
+  return DATA.records.some(rows => rows.some(r => r.against));
+}
+
+function summarise(rows, statName, line, which) {
+  const vals = rows.map(r => statValue(r, statName, which))
                    .filter(v => v !== undefined && v !== null);
   if (!vals.length) return null;
   const hits = vals.filter(v => v > line).length;
   return { vals, hits, pct: Math.round((hits / vals.length) * 100) };
 }
 
-function sparkline(rows, statName, line, colorVar, w) {
+function sparkline(rows, statName, line, colorVar, which) {
   const points = rows
-    .map(r => ({ v: statValue(r, statName), r }))
+    .map(r => ({ v: statValue(r, statName, which), r }))
     .filter(p => p.v !== undefined && p.v !== null);
 
   if (points.length < 2) return "";
 
-  const W = w || 116, H = 38, PAD = 6;
+  const W = 116, H = 38, PAD = 6;
   const vals = points.map(p => p.v).concat([line]);
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const span = (hi - lo) || 1;
@@ -463,12 +486,15 @@ function sparkline(rows, statName, line, colorVar, w) {
 function sideHtml(rows, statName, line, index) {
   const letter = index === 0 ? "a" : "b";
   const colorVar = VARS[index];
+  const which = bucketFor(index);
+  const suffix = measure === "for" ? ""
+    : (which === "against" ? " conceded" : " for");
   const tag = `<span class="team-tag">
       <span class="swatch" style="background:var(${colorVar})"></span>
-      ${DATA.teams[index].name}
+      ${DATA.teams[index].name}${suffix}
     </span>`;
 
-  const s = summarise(rows, statName, line);
+  const s = summarise(rows, statName, line, which);
   if (!s) {
     return `<div class="side ${letter}">${tag}
       <span class="empty">no data</span></div>`;
@@ -484,7 +510,7 @@ function sideHtml(rows, statName, line, index) {
       <div class="bar"><div class="fill"
         style="width:${s.pct}%;background:var(${colorVar})"></div></div>
     </div>
-    ${sparkline(rows, statName, line, colorVar)}
+    ${sparkline(rows, statName, line, colorVar, which)}
     <span class="seq">${seq}</span>
   </div>`;
 }
@@ -502,8 +528,8 @@ function visibleStats() {
 
   const strength = name => {
     const line = lines[name];
-    return Math.max(...teamRows.map(rows => {
-      const s = summarise(rows, name, line);
+    return Math.max(...teamRows.map((rows, i) => {
+      const s = summarise(rows, name, line, bucketFor(i));
       return s ? Math.abs(s.pct - 50) : 0;
     }));
   };
@@ -511,8 +537,8 @@ function visibleStats() {
   if (strongOnly) {
     stats = stats.filter(n => {
       const line = lines[n];
-      return teamRows.some(rows => {
-        const s = summarise(rows, n, line);
+      return teamRows.some((rows, i) => {
+        const s = summarise(rows, n, line, bucketFor(i));
         return s && (s.pct >= STRONG_HIGH || s.pct <= STRONG_LOW);
       });
     });
@@ -535,8 +561,8 @@ function updateRow(row) {
   middle.insertAdjacentHTML("beforebegin", sideHtml(teamRows[0], name, line, 0));
   middle.insertAdjacentHTML("afterend", sideHtml(teamRows[1], name, line, 1));
 
-  const strong = teamRows.some(rows => {
-    const s = summarise(rows, name, line);
+  const strong = teamRows.some((rows, i) => {
+    const s = summarise(rows, name, line, bucketFor(i));
     return s && (s.pct >= STRONG_HIGH || s.pct <= STRONG_LOW);
   });
   row.classList.toggle("strong", strong);
@@ -886,6 +912,13 @@ function applyFixture() {
     SUGGESTED_H2H[key] = Object.assign({}, bucket);
   }
 
+  // Reports built before "against" existed have no conceded numbers.
+  if (!hasAgainst() && measure !== "for") measure = "for";
+  document.querySelectorAll("[data-measure]").forEach(b => {
+    b.disabled = b.dataset.measure !== "for" && !hasAgainst();
+    b.setAttribute("aria-pressed", b.dataset.measure === measure);
+  });
+
   // A fixture between newly promoted sides may have no previous meetings.
   if (!hasH2H() && source === "h2h") source = "form";
   document.querySelectorAll("[data-source]").forEach(b => {
@@ -999,6 +1032,7 @@ segment("games", v => {
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
 segment("period", v => { period = v; render(); });
 segment("source", v => { source = v; render(); });
+segment("measure", v => { measure = v; render(); });
 segment("scope", v => { scope = v; render(); });
 segment("sort", v => { sort = v; render(); });
 
@@ -1028,17 +1062,66 @@ document.getElementById("theme").addEventListener("click", () => {
     "data-theme", now === "dark" ? "light" : "dark");
 });
 
+/* The report is a static snapshot, but the browser knows the time, so it can
+   drop fixtures that have already kicked off. That keeps a weekend card
+   useful all weekend instead of going stale one match at a time. */
 const fixtureSelect = document.getElementById("fixture");
+const pastToggle = document.getElementById("show-past");
+
+function upcomingIndexes() {
+  const now = Date.now() / 1000;
+  return ALL.fixtures
+    .map((f, i) => i)
+    .filter(i => showPast || (ALL.fixtures[i].fixture.kickoff || 0) > now);
+}
+
+function fillFixtures() {
+  let indexes = upcomingIndexes();
+
+  // If every fixture has been played, show them all rather than an empty page.
+  const allPlayed = indexes.length === 0;
+  if (allPlayed) indexes = ALL.fixtures.map((f, i) => i);
+
+  const now = Date.now() / 1000;
+  fixtureSelect.innerHTML = indexes.map(i => {
+    const f = ALL.fixtures[i].fixture;
+    const played = (f.kickoff || 0) <= now;
+    return `<option value="${i}">${f.home} v ${f.away}${played ? " (played)" : ""}</option>`;
+  }).join("");
+
+  const hidden = ALL.fixtures.length - indexes.length;
+  pastToggle.hidden = ALL.fixtures.length < 2;
+  pastToggle.textContent = hidden
+    ? `Show ${hidden} played`
+    : (showPast ? "Hide played" : "All upcoming");
+  pastToggle.setAttribute("aria-pressed", showPast);
+
+  // Keep the current fixture selected if it survived the filter.
+  const current = ALL.fixtures.indexOf(DATA);
+  if (indexes.includes(current)) {
+    fixtureSelect.value = String(current);
+  } else {
+    DATA = ALL.fixtures[indexes[0]];
+    fixtureSelect.value = String(indexes[0]);
+    applyFixture();
+  }
+
+  document.getElementById("fixture-group").hidden = indexes.length < 2;
+}
+
 if (ALL.fixtures.length > 1) {
-  fixtureSelect.innerHTML = ALL.fixtures
-    .map((f, i) => `<option value="${i}">${f.fixture.home} v ${f.fixture.away}</option>`)
-    .join("");
   fixtureSelect.addEventListener("change", () => {
     DATA = ALL.fixtures[parseInt(fixtureSelect.value, 10)];
     applyFixture();
   });
+  pastToggle.addEventListener("click", () => {
+    showPast = !showPast;
+    fillFixtures();
+  });
+  fillFixtures();
 } else {
   document.getElementById("fixture-group").hidden = true;
+  pastToggle.hidden = true;
 }
 
 /* Rebuilding both squad tables on every keystroke is laggy once a report
@@ -1099,6 +1182,7 @@ def build_html(payload: dict) -> str:
   <div class="control-group" id="fixture-group">
     <span class="control-label">Fixture</span>
     <select id="fixture"></select>
+    <div class="seg"><button type="button" id="show-past" aria-pressed="false">All upcoming</button></div>
   </div>
 
   <div class="control-group">
@@ -1140,6 +1224,15 @@ def build_html(payload: dict) -> str:
     <div class="seg">
       <button type="button" data-source="form" aria-pressed="true">Recent form</button>
       <button type="button" data-source="h2h" aria-pressed="false">Head to head</button>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <span class="control-label">Measure</span>
+    <div class="seg">
+      <button type="button" data-measure="for" aria-pressed="true">For</button>
+      <button type="button" data-measure="against" aria-pressed="false">Against</button>
+      <button type="button" data-measure="matchup" aria-pressed="false">Matchup</button>
     </div>
   </div>
 
@@ -1223,6 +1316,8 @@ def build_html(payload: dict) -> str:
   <span id="sample"></span>
   Dashed line on each chart marks the quoted line. Numbers run oldest to newest,
   left to right. Shaded rows are 80% or above, or 20% or below.
+  Matchup puts the home side's own numbers against the away side's conceded ones,
+  so you can see whether an attack meets a leak.
   Built {generated} from SofaScore data, covering {scope}.
 </footer>
 

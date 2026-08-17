@@ -151,6 +151,7 @@ def build_fixture(
             "away": away["name"],
             "competition": tournament.get("name", "Football"),
             "date": kickoff,
+            "kickoff": event.get("startTimestamp", 0),
         },
         "teams": [
             {"name": home["name"], "side": "home"},
@@ -290,6 +291,15 @@ def demo() -> Path:
             # which is roughly how real matches behave.
             first = {k: round(v * rng.uniform(0.35, 0.55)) for k, v in full.items()}
             second = {k: v - first[k] for k, v in full.items()}
+
+            # What the opposition managed. Independent of `full` on purpose,
+            # so the For and Against views are visibly different in the demo.
+            opp = {
+                name: max(0, round(rng.gauss(mean * (2 - strength), spread)))
+                for name, mean, spread in team_stats
+            }
+            opp_first = {k: round(v * rng.uniform(0.35, 0.55)) for k, v in opp.items()}
+            opp_second = {k: v - opp_first[k] for k, v in opp.items()}
             matches.append({
                 "id": rng.randint(10**6, 10**7),
                 "date": f"2026-0{3 + i // 5}-{(i * 3) % 28 + 1:02d}",
@@ -299,6 +309,7 @@ def demo() -> Path:
                 "goals_against": rng.randint(0, 3),
                 "result": rng.choice(["W", "D", "L"]),
                 "stats": {"ALL": full, "1ST": first, "2ND": second},
+                "against": {"ALL": opp, "1ST": opp_first, "2ND": opp_second},
             })
         return matches
 
@@ -356,6 +367,7 @@ def demo() -> Path:
                 "away": away,
                 "competition": "LaLiga (demo data)",
                 "date": "Sunday 16 August 2026, 18:00 UTC",
+                "kickoff": 4102444800,   # far future, so the demo never hides
             },
             "teams": [{"name": home, "side": "home"}, {"name": away, "side": "away"}],
             "records": matches,

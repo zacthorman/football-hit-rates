@@ -76,6 +76,16 @@ Useful flags: `--players` to include per-player stats, `--games 20` for a deeper
 
 Treat it as a shortlist to price up. A hit rate is not an edge: what makes a bet worth taking is the price being wrong, and there is no odds feed here to tell you that. The suggested lines are also derived from the same matches being measured, which flatters every number in the table.
 
+**Measure.** For, Against, or Matchup.
+
+- **For** is each team's own numbers, the default.
+- **Against** is what opponents managed against them, so "corners conceded" rather than "corners won".
+- **Matchup** is the one worth reaching for: the home side's own numbers on the left against the away side's conceded numbers on the right. That answers whether an attack actually meets a leak, rather than comparing two attacks that never face each other.
+
+None of this costs extra requests. The statistics endpoint always sends both teams' figures for every match; the earlier version simply discarded the opponent's half.
+
+**Played fixtures drop off by themselves.** The report is a static snapshot, but the browser knows the time, so a multi-fixture report hides games once they have kicked off and the button next to the dropdown brings them back. If every fixture has been played it shows them all rather than an empty page, and the index marks that report as history.
+
 **Sample.** Recent form, or head to head. Head to head is the same layout over previous meetings between these two teams instead of their recent matches, with its own suggested lines, since two teams meeting each other produce different numbers from their form against everyone else. Needs `--h2h` when building.
 
 **Layout.** Each stat is one row with the two teams facing each other around the stat name, so the comparison is a single glance. On a phone the same row stacks into a card. **Main** shows the seven stats worth most attention; **All** shows everything the endpoint returned. **Strongest first** sorts by distance from an even split, and **Strong only** keeps just the rows where a team is at 80% or above, or 20% or below. Those rows are also shaded.

@@ -22,7 +22,7 @@ ROOT = Path(__file__).parent
 REPORTS = ROOT / "reports"
 
 
-def read_report(path: Path) -> tuple[str, int, list[str]]:
+def read_report(path: Path) -> tuple[str, int, list[str], int]:
     """Title, fixture count and fixture names, read off a built report.
 
     The whole file is read in one go rather than just the start: the inlined
@@ -33,12 +33,13 @@ def read_report(path: Path) -> tuple[str, int, list[str]]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        return path.stem, 1, []
+        return path.stem, 1, [], 0
 
     match = re.search(r'<h1 id="title">(.*?)</h1>', text)
     title = html.unescape(match.group(1)) if match else path.stem
 
     names: list[str] = []
+    upcoming = 0
     payload = re.search(r"const ALL = (\{.*?\});\n", text, re.S)
     if payload:
         try:
@@ -46,10 +47,14 @@ def read_report(path: Path) -> tuple[str, int, list[str]]:
             names = [
                 f"{f['fixture']['home']} v {f['fixture']['away']}" for f in fixtures
             ]
+            now = datetime.now(tz=timezone.utc).timestamp()
+            upcoming = sum(
+                1 for f in fixtures if (f["fixture"].get("kickoff") or 0) > now
+            )
         except (json.JSONDecodeError, ValueError, KeyError):
             names = []
 
-    return title, max(1, len(names)), names
+    return title, max(1, len(names)), names, upcoming
 
 
 def main() -> None:
@@ -67,7 +72,7 @@ def main() -> None:
     rows = []
     for path in files:
         built = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-        title, count, names = read_report(path)
+        title, count, names, upcoming = read_report(path)
 
         if count > 1:
             heading = f"{count} fixtures"
@@ -76,12 +81,23 @@ def main() -> None:
             heading = title
             detail = ""
 
-        meta = f'built {built.strftime("%d %b %Y, %H:%M")} UTC'
+        # A report whose fixtures have all been played is history, not a
+        # preview. Say so rather than leaving you to click and find out.
+        if upcoming == 0:
+            state = "all played"
+        elif upcoming == count:
+            state = f"{upcoming} upcoming"
+        else:
+            state = f"{upcoming} of {count} still to play"
+
+        meta = f'{state} &middot; built {built.strftime("%d %b %Y, %H:%M")} UTC'
         if detail:
             meta = f"{html.escape(detail)} &middot; {meta}"
 
+        css_class = ' class="played"' if upcoming == 0 else ""
         rows.append(
-            f'<li><a href="reports/{html.escape(path.name)}">'
+            f"<li{css_class}>"
+            f'<a href="reports/{html.escape(path.name)}">'
             f"{html.escape(heading)}</a>"
             f'<span class="meta">{meta}</span></li>'
         )
@@ -126,6 +142,7 @@ ul {{ list-style: none; margin: 0; padding: 0;
       border-radius: 10px; overflow: hidden; }}
 li {{ border-bottom: 1px solid var(--grid); }}
 li:last-child {{ border-bottom: 0; }}
+li.played {{ opacity: 0.55; }}
 li a {{ display: block; padding: 14px 18px 6px; color: var(--link);
         text-decoration: none; font-weight: 600; }}
 li a:hover {{ text-decoration: underline; }}

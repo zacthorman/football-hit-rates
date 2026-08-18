@@ -37,8 +37,14 @@ python run.py --team 2814 --pick 0,1,2
 python run.py --teams 2814,2833,2817 --players
 
 # A whole division's next round
-python run.py --league premier_league --players --h2h
+python run.py --league premier_league --players --h2h --adjust
+
+# Every major league, one report each, all listed on the site
+python run.py --leagues premier_league,championship,la_liga,serie_a,bundesliga,ligue_1 --adjust
+python make_index.py
 ```
+
+`--leagues` writes one report per division rather than a single enormous file, so the index reads as a list of rounds and no page has to carry a hundred fixtures. Files are named after the competition, so each league keeps its own and re-running replaces only that one.
 
 `--league` reads the team list off the league table, so you don't have to know twenty ids, then collapses each team's next fixture into a round. Known names: `premier_league`, `championship`, `la_liga`, `serie_a`, `bundesliga`, `ligue_1`, `champions_league`, `europa_league`. Any other competition works by passing its uniqueTournament id.
 
@@ -61,6 +67,10 @@ So five fixtures with players is around 220 requests and six minutes, which is c
 
 Running a full weekend's card the night before is entirely reasonable. Running it repeatedly in a tight loop is not, and would get your IP blocked.
 
+**Only bettable markets by default.** SofaScore returns plenty that has no market attached to it (goals prevented, expected assists, duels won), and every extra row is another combination for the Standout scan to trawl and another chance for a coincidence to look like a finding. Team stats are filtered to shots, shots on target, shots off target, blocked shots, shots inside and outside the box, corners, offsides, throw-ins, fouls, cards, goal kicks, free kicks, tackles and big chances. Player props are filtered to shots, shots on target, goals, assists, tackles, fouls, fouled, offsides, clearances, interceptions, passes, crosses and saves, plus minutes, which is not a market but decides whether the rest matter. `--all-stats` turns the filter off.
+
+**Fouls won come free.** Fouls conceded is the "For" measure and fouls won is the "Against" measure of the same stat, so the Measure control already gives you both without a separate row.
+
 Useful flags: `--players` to include per-player stats, `--games 20` for a deeper sample, `--show 10` to list more fixtures, `--no-open` to skip launching the browser.
 
 ## In the report
@@ -74,6 +84,10 @@ Useful flags: `--players` to include per-player stats, `--games 20` for a deeper
 - It ranks by the lower bound of a 95% confidence interval, not by raw percentage. That matters because 5/5 is 100% and 18/20 is 90%, yet the second is far stronger evidence. Ranking by percentage puts the flukes on top; this puts them where they belong.
 - It tells you how many combinations it scanned, and roughly how many would look that consistent from chance alone. Scan 1,400 combinations at ten matches each and about 15 will reach 9/10 by luck. Without that number, a list of "strong" lines is indistinguishable from a list of coincidences.
 
+**Fair and Need.** Each row turns its hit rate into a price two ways. **Fair** is what the hit rate implies on its own (1 divided by the rate). **Need** comes from the bottom of the confidence interval and is the one to bet off. The gap between them is the point: 8/10 reads as a fair 1.25, but ten matches cannot tell 80% from 55%, so the evidence only really justifies 2.04 or better. Type a bookmaker's price into "Your price" and the row says whether it clears, using the conservative figure. Getting a yes should be hard.
+
+Neither number includes the bookmaker's margin. A real market is priced so the implied probabilities sum above 100%, typically 105 to 108% on these, so the available price is worse than fair by design.
+
 Treat it as a shortlist to price up. A hit rate is not an edge: what makes a bet worth taking is the price being wrong, and there is no odds feed here to tell you that. The suggested lines are also derived from the same matches being measured, which flatters every number in the table.
 
 **Measure.** For, Against, or Matchup.
@@ -86,7 +100,23 @@ None of this costs extra requests. The statistics endpoint always sends both tea
 
 **Played fixtures drop off by themselves.** The report is a static snapshot, but the browser knows the time, so a multi-fixture report hides games once they have kicked off and the button next to the dropdown brings them back. If every fixture has been played it shows them all rather than an empty page, and the index marks that report as history.
 
+**Opponent adjustment (`--adjust`).** Fits attack and defence ratings for every club in the competition, then projects what each team should actually do *in this fixture against this opponent*. Shown as "proj 11.0 v 8.4" under each line, and turned red when the projection lands on the other side of the line from the record. That red flag is the case you care about: a true 100% that the model expects to fail.
+
+The model is the standard multiplicative one. A team's attack rating is its own average divided by the league average, its defence rating is what it concedes divided by the same, and the expected value is `league average x attack x opponent defence`, with separate home and away baselines. It is fitted iteratively rather than in one pass, because a single pass inherits the schedule: a strong side never plays itself, so its opponents are weaker than average and its rating comes out flattered. On a synthetic league with known multipliers, one pass overstated a projection by 17% and the iterative fit recovers the truth.
+
+Three honest limits:
+
+- **It needs the division.** Ratings are fitted from every club's recent form, so the first `--adjust` run on a competition fetches all twenty clubs. Slow once, then cached, and a `--league` round reuses matches it was fetching anyway.
+- **A promoted side comes out as exactly average.** Their sample is from another division, so there are no matches against this division's teams to fit against, and they default to a 1.0 rating. That is a guess, not a measurement, and the different-opposition warning still fires.
+- **Ten matches is a thin fit.** The ratings are directionally useful and not precise. They know nothing about injuries, rotation, or a manager changing shape.
+
+**Different opposition warning.** If a team's sample was built mostly in another competition, the team tab says so and the Standout scan leaves them out until you ask for them. This is the trap the tool is least able to solve on its own: a promoted side putting up 12 shots a game against Championship defences has a perfectly true 100% record over 2.5 shots, and it tells you almost nothing about how they'll do away at Arsenal. The hit rate carries no memory of who it was set against.
+
+Note what this does and does not do. It flags a mismatch; it does not adjust for one. Adjusting properly means weighting every match by the opponent's strength, which is a model rather than a filter.
+
 **Sample.** Recent form, or head to head. Head to head is the same layout over previous meetings between these two teams instead of their recent matches, with its own suggested lines, since two teams meeting each other produce different numbers from their form against everyone else. Needs `--h2h` when building.
+
+**Team.** Both, or one side on its own. Picking a single team drops the head-to-head split and gives that team the full width, which is the easier read when you only care about one of them. The projection, the strong-row shading and the charts all follow the selection.
 
 **Layout.** Each stat is one row with the two teams facing each other around the stat name, so the comparison is a single glance. On a phone the same row stacks into a card. **Main** shows the seven stats worth most attention; **All** shows everything the endpoint returned. **Strongest first** sorts by distance from an even split, and **Strong only** keeps just the rows where a team is at 80% or above, or 20% or below. Those rows are also shaded.
 
@@ -102,6 +132,25 @@ It works team-first rather than date-first because SofaScore removed their date-
 
 The report lands in `reports/` and opens automatically. Inside it you can switch between last 5, last 10 and all, and between all matches, home only and away only. Hover any point on a chart for the date, opponent and value.
 
+## Weekly routine
+
+```bash
+python run.py --leagues premier_league,championship,la_liga --adjust
+./publish.sh
+```
+
+That is the whole thing. No `git add`, no commit, no push for the reports.
+
+Two reasons it stays cheap:
+
+**Fetching is already incremental.** Finished matches never change, so their responses are cached permanently. A new gameweek only fetches that week's matches; everything before it is read off disk. The second run of a season is nearly instant regardless of how many leagues you build.
+
+**Publishing does not grow the repo.** `publish.sh` force-pushes the built site to a `gh-pages` branch as a single commit, replacing whatever was there. `main` never carries a report, so it stays small forever. Committing a 3.5 MB file every gameweek would otherwise write the better part of a gigabyte into history over a season, for files that rebuild from cache in seconds.
+
+One-time setup: Settings, Pages, Source "Deploy from a branch", Branch `gh-pages`, Folder `/ (root)`. The script also writes a `.nojekyll` file, which stops GitHub running the site through Jekyll, the step that failed during the outage.
+
+Commit source changes to `main` as normal. Only generated output goes to `gh-pages`.
+
 ## The files
 
 | File | What it does |
@@ -110,6 +159,9 @@ The report lands in `reports/` and opens automatically. Inside it you can switch
 | `sofascore_api.py` | Fetching and caching. Every response saved to `cache/` before parsing. |
 | `hitrates.py` | Parses match statistics, builds each team's form, works out the lines. |
 | `report.py` | Generates the HTML. |
+| `publish.sh` | Pushes the built site to gh-pages without growing the repo. |
+| `make_index.py` | Builds the front page listing every report. |
+| `check.py` | Probes endpoints when something breaks. |
 | `explore.ipynb` | Your notebook. Keep it for experimenting. |
 | `TEST.md` | The 21 questions. |
 | `PLAN.md` | What this was meant to be, and what's left. |

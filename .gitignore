@@ -16,6 +16,9 @@ __pycache__/
 # Scratch output from the notebook. Delete this line if you want to keep it.
 live_matches.csv
 
-# Reports ARE committed, because they are what GitHub Pages serves.
-# If you would rather keep them out of the repo, uncomment this:
-# reports/
+# Generated output. These are published to the gh-pages branch by
+# publish.sh rather than committed here, because a 3.5 MB report rewritten
+# every gameweek would put hundreds of megabytes into main's history for
+# files that rebuild from the cache in seconds.
+reports/
+index.html

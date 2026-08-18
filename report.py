@@ -182,6 +182,15 @@ select, .num-input {
 .stat-row:last-child { border-bottom: 0; }
 .stat-row.strong { background: var(--tint); }
 
+/* One team at a time: the middle column leads, the single side gets the rest
+   of the width, and everything reads left to right like a normal table. */
+.stat-row.solo { grid-template-columns: 230px 1fr; }
+.stat-row.solo .middle { order: 1; text-align: left; }
+.stat-row.solo .stepper { justify-content: flex-start; }
+.stat-row.solo .side { order: 2; flex-direction: row; }
+.stat-row.solo .side.a .figure { text-align: left; }
+.stat-row.solo .side.a .bar { justify-content: flex-start; }
+
 .middle { text-align: center; order: 2; }
 .stat-label {
   font-size: 15px; font-weight: 620; margin-bottom: 6px; line-height: 1.25;
@@ -272,6 +281,13 @@ select, .num-input {
   font-size: 13.5px; color: var(--text-secondary);
 }
 .caution strong { color: var(--text-primary); }
+.warn {
+  border: 1px solid var(--border); border-left: 3px solid var(--miss);
+  background: var(--surface-1); border-radius: 10px;
+  padding: 12px 15px; margin: 0 0 14px;
+  font-size: 13.5px; color: var(--text-secondary);
+}
+.warn strong { color: var(--text-primary); }
 .pill {
   display: inline-block; padding: 2px 8px; border-radius: 999px;
   font-size: 11.5px; font-weight: 620; letter-spacing: 0.02em;
@@ -279,6 +295,27 @@ select, .num-input {
   white-space: nowrap;
 }
 .dir { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.odds { font-variant-numeric: tabular-nums; font-weight: 620; white-space: nowrap; }
+.odds-min { font-size: 17px; }
+.price-input {
+  width: 72px; height: 30px; text-align: center;
+  border: 1px solid var(--border); background: var(--control-bg);
+  color: var(--text-primary); border-radius: 7px;
+  font: inherit; font-size: 14px; font-variant-numeric: tabular-nums;
+}
+.price-input::-webkit-outer-spin-button,
+.price-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.verdict { font-weight: 660; white-space: nowrap; font-size: 14px; }
+.verdict.yes { color: var(--hit); }
+.verdict.thin { color: var(--text-secondary); }
+.verdict.no { color: var(--miss); }
+.sub-line { color: var(--muted); font-size: 12px; font-weight: 500; display: block; }
+.proj {
+  margin-top: 7px; font-size: 12.5px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.proj b { font-weight: 680; color: var(--text-primary); }
+.proj.conflict { color: var(--miss); }
 .chance { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 
 .tooltip {
@@ -344,15 +381,20 @@ let strongOnly = false;
 let source = "form";      // "form" = recent matches, "h2h" = previous meetings
 let measure = "for";      // "for" | "against" | "matchup"
 let showPast = false;
+let includeMismatched = false;
+let focus = "both";   // "both" | "0" | "1"
 
 // A hit rate this far from an even split is worth your attention. Below it,
 // ten matches simply cannot separate signal from noise.
 const STRONG_HIGH = 80;
 const STRONG_LOW = 20;
 
+/* The markets worth leading with. "All" still shows everything that came
+   through, which is now only the bettable set unless the report was built
+   with --all-stats. */
 const CORE_STATS = [
   "Total shots", "Shots on target", "Corner kicks",
-  "Offsides", "Fouls", "Yellow cards", "Throw-ins",
+  "Fouls", "Offsides", "Throw-ins", "Yellow cards",
 ];
 
 const VARS = ["--team-1", "--team-2"];
@@ -426,6 +468,53 @@ function statValue(record, statName, which) {
 
 function hasAgainst() {
   return DATA.records.some(rows => rows.some(r => r.against));
+}
+
+/* A team promoted, relegated, or arriving from a cup run carries a record
+   built against different opposition. Coventry putting up 12 shots a game in
+   the Championship says very little about Coventry away at Arsenal, but the
+   hit rate looks identical either way, which is how a 100% record turns into
+   a losing bet. This does not adjust for it, because doing that honestly
+   needs a model. It flags it, so the number is read with the right amount of
+   suspicion. */
+function sampleMix(teamIndex) {
+  const rows = filtered(activeRecords()[teamIndex]);
+  const counts = {};
+  rows.forEach(r => {
+    const c = r.competition || "?";
+    counts[c] = (counts[c] || 0) + 1;
+  });
+  const fixtureComp = DATA.fixture.competition;
+  const matching = counts[fixtureComp] || 0;
+  return {
+    total: rows.length,
+    matching,
+    counts,
+    mismatched: rows.length > 0 && matching / rows.length < 0.6,
+  };
+}
+
+function mismatchWarning() {
+  const notes = [];
+  DATA.records.forEach((rows, i) => {
+    const mix = sampleMix(i);
+    if (!mix.mismatched) return;
+    const where = Object.entries(mix.counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([c, n]) => `${n} in ${c}`)
+      .join(", ");
+    notes.push(`<strong>${DATA.teams[i].name}</strong>: ${where}`);
+  });
+
+  if (!notes.length) return "";
+
+  return `<div class="warn">
+    <strong>Different opposition.</strong> These figures were not built against
+    the standard of side they face here: ${notes.join("; ")}.
+    A record set in another competition can be perfectly true and still a poor
+    guide, because the hit rate carries no memory of who it was set against.
+    Treat anything at 90% or 100% here with real suspicion.
+  </div>`;
 }
 
 function summarise(rows, statName, line, which) {
@@ -515,6 +604,43 @@ function sideHtml(rows, statName, line, index) {
   </div>`;
 }
 
+/* The projection answers the question a hit rate cannot: what should this
+   team actually do in THIS fixture, against THIS opponent. It comes from the
+   fitted attack and defence ratings, so a promoted side's flattering record
+   gets discounted by the quality of who they are about to play.
+
+   Flagged in red when the projection lands on the opposite side of the line
+   from the record, because that is exactly the case worth catching: a true
+   100% that the model expects to fail. */
+function projectionHtml(name, line) {
+  const proj = (DATA.projection || {})[period];
+  if (!proj || !proj[name] || line === undefined) return "";
+
+  const values = proj[name];
+  const teamRows = activeRecords().map(filtered);
+  const shown = focusedIndexes();
+  let conflict = false;
+
+  shown.forEach(i => {
+    const value = values[i];
+    const s = summarise(teamRows[i], name, line, bucketFor(i));
+    if (!s || value === undefined) return;
+    const recordSaysOver = s.pct >= 60;
+    const recordSaysUnder = s.pct <= 40;
+    if ((recordSaysOver && value < line) || (recordSaysUnder && value > line)) {
+      conflict = true;
+    }
+  });
+
+  const text = shown.length === 1
+    ? `<b>${values[shown[0]]}</b>`
+    : `<b>${values[0]}</b> v <b>${values[1]}</b>`;
+
+  return `<div class="proj${conflict ? " conflict" : ""}"
+    title="Expected in this fixture, from opponent-adjusted ratings">
+    proj ${text}${conflict ? " (record disagrees)" : ""}</div>`;
+}
+
 function visibleStats() {
   const lines = activeLines();
   let stats = activeStats().filter(n => lines[n] !== undefined);
@@ -551,18 +677,29 @@ function visibleStats() {
   return stats;
 }
 
+function focusedIndexes() {
+  return focus === "both" ? [0, 1] : [parseInt(focus, 10)];
+}
+
 function updateRow(row) {
   const name = row.dataset.stat;
   const line = activeLines()[name];
   const teamRows = activeRecords().map(filtered);
+  const shown = focusedIndexes();
 
   row.querySelectorAll(".side").forEach(el => el.remove());
+  row.classList.toggle("solo", shown.length === 1);
   const middle = row.querySelector(".middle");
-  middle.insertAdjacentHTML("beforebegin", sideHtml(teamRows[0], name, line, 0));
-  middle.insertAdjacentHTML("afterend", sideHtml(teamRows[1], name, line, 1));
 
-  const strong = teamRows.some((rows, i) => {
-    const s = summarise(rows, name, line, bucketFor(i));
+  if (shown.length === 1) {
+    middle.insertAdjacentHTML("afterend", sideHtml(teamRows[shown[0]], name, line, shown[0]));
+  } else {
+    middle.insertAdjacentHTML("beforebegin", sideHtml(teamRows[0], name, line, 0));
+    middle.insertAdjacentHTML("afterend", sideHtml(teamRows[1], name, line, 1));
+  }
+
+  const strong = shown.some(i => {
+    const s = summarise(teamRows[i], name, line, bucketFor(i));
     return s && (s.pct >= STRONG_HIGH || s.pct <= STRONG_LOW);
   });
   row.classList.toggle("strong", strong);
@@ -610,9 +747,11 @@ function render() {
                  data-line aria-label="Line for ${name}">
           <button type="button" data-step="1" title="Raise the line by 1">+</button>
         </div>
+        ${projectionHtml(name, lines[name])}
       </div>
     </div>`).join("");
 
+  document.getElementById("mismatch").innerHTML = mismatchWarning();
   updateAll();
 }
 
@@ -662,6 +801,26 @@ function binomTail(n, k) {
   return total;
 }
 
+/* Turning a hit rate into a price is one division, and that is exactly why
+   it is dangerous. 8/10 implies a fair price of 1.25, which looks like free
+   money, but ten matches cannot tell 80% from 55%. Run the interval and the
+   evidence only supports 2.04 or better.
+
+   So two numbers are quoted. `fair` is what the point estimate says, and it
+   is the optimistic one. `minPrice` comes from the bottom of the confidence
+   interval and is the number to actually bet off, because it is the price at
+   which you are still ahead if your sample flattered the team.
+
+   Neither includes the bookmaker's margin. A real market is priced so the
+   implied probabilities sum to more than 100%, typically 105-108% on these,
+   so the available price is always worse than fair by design. */
+function fairOdds(p) { return p > 0 ? 1 / p : Infinity; }
+
+function fmtOdds(o) {
+  if (!isFinite(o)) return "n/a";
+  return o >= 10 ? o.toFixed(0) : o.toFixed(2);
+}
+
 const VENUE_SPLITS = [
   { key: "all", label: "All matches" },
   { key: "home", label: "At home" },
@@ -671,6 +830,7 @@ const VENUE_SPLITS = [
 function scanLines(minSample) {
   const found = [];
   let combos = 0;
+  let skipped = 0;
 
   ALL.fixtures.forEach((fx, fxIndex) => {
     Object.keys(fx.lines || {}).forEach(per => {
@@ -680,6 +840,17 @@ function scanLines(minSample) {
         if (line === undefined) return;
 
         fx.records.forEach((records, teamIndex) => {
+          // Skip teams whose record was built in another competition. This
+          // is the Coventry case: a true 100% that will not survive contact
+          // with the division they are actually playing in.
+          if (!includeMismatched) {
+            const sample = records.slice(-games);
+            const matching = sample.filter(
+              r => (r.competition || "?") === fx.fixture.competition
+            ).length;
+            if (sample.length && matching / sample.length < 0.6) { skipped++; return; }
+          }
+
           // Best split per team/stat/period, so one pattern is one row
           // rather than three near-identical ones.
           let best = null;
@@ -731,14 +902,14 @@ function scanLines(minSample) {
   });
 
   found.sort((a, b) => b.score - a.score);
-  return { found, combos };
+  return { found, combos, skipped };
 }
 
 function standoutView() {
   const minSample = parseInt(document.getElementById("smin").value, 10) || 6;
   const limit = parseInt(document.getElementById("stop").value, 10) || 20;
 
-  const { found, combos } = scanLines(minSample);
+  const { found, combos, skipped } = scanLines(minSample);
   const shown = found.slice(0, limit);
 
   const periodName = p => (ALL.periods && ALL.periods[p]) || p;
@@ -754,22 +925,31 @@ function standoutView() {
   const weakest = shown[shown.length - 1];
   const expected = combos * binomTail(weakest.n, weakest.k);
 
-  const rows = shown.map(r => `
-    <tr>
+  const rows = shown.map((r, i) => {
+    const p = r.k / r.n;
+    const fair = fairOdds(p);
+    const minPrice = fairOdds(r.score);   // r.score is the Wilson lower bound
+    return `
+    <tr data-row="${i}" data-plow="${r.score}" data-fair="${fair}" data-min="${minPrice}">
       <td class="player-name">${r.stat}
-        <span class="pos">${periodName(r.period)}</span></td>
+        <span class="pos">${periodName(r.period)}</span>
+        <span class="sub-line">${r.team} &middot; ${r.split} &middot; ${r.fixture}</span></td>
       <td class="dir">${r.over ? "Over" : "Under"} ${r.line}</td>
-      <td>
-        <div><span class="pct">${Math.round((r.k / r.n) * 100)}%</span>
+      <td data-label="Record">
+        <div><span class="pct">${Math.round(p * 100)}%</span>
              <span class="frac">${r.k}/${r.n}</span></div>
-        <div class="bar"><div class="fill" style="width:${(r.k / r.n) * 100}%;
+        <div class="bar"><div class="fill" style="width:${p * 100}%;
              background:var(${VARS[r.teamIndex]})"></div></div>
       </td>
-      <td class="num" data-label="Team">${r.team}</td>
-      <td class="num" data-label="Split"><span class="pill">${r.split}</span></td>
-      <td class="num" data-label="Fixture">${r.fixture}</td>
+      <td class="odds" data-label="Fair">${fmtOdds(fair)}</td>
+      <td class="odds odds-min" data-label="Need">${fmtOdds(minPrice)}</td>
+      <td data-label="Your price">
+        <input class="price-input" type="number" step="0.05" min="1.01"
+               data-price aria-label="Bookmaker price for ${r.stat}"></td>
+      <td class="verdict" data-verdict data-label="Verdict"></td>
       <td class="chance" data-label="By chance">${(r.chance * 100).toFixed(1)}%</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   document.getElementById("standout").innerHTML = `
     <div class="caution">
@@ -781,11 +961,25 @@ function standoutView() {
       A hit rate is not an edge: the only thing that makes a bet worth taking is the
       price being wrong, and there is no odds feed here to tell you that.
       The lines are also derived from these same matches, which flatters them.
+      ${skipped ? `<br><br><strong>${skipped}</strong> team-stat combinations were
+        left out because that side's record was built in a different competition
+        from the one they are playing in. Use the toggle to include them, but a
+        promoted side's numbers against weaker opposition are exactly the sort of
+        true record that loses money.` : ""}
+      <br><br>
+      <strong>Fair</strong> is the price the hit rate implies on its own.
+      <strong>Need</strong> is the price the <em>evidence</em> supports, taken from the
+      bottom of a 95% interval, and it is the one to bet off. Ten matches cannot tell
+      80% from 55%, so 8/10 reads as a fair 1.25 while only really justifying 2.04.
+      Neither figure includes the bookmaker's margin, which is typically 5 to 8% on
+      these markets and always works against you.
     </div>
     <div class="board"><table class="ptable">
       <thead><tr>
-        <th>Stat</th><th>Line</th><th>Record</th><th>Team</th>
-        <th>Split</th><th>Fixture</th><th>By chance</th>
+        <th>Stat</th><th>Line</th><th>Record</th>
+        <th title="Price implied by the hit rate itself">Fair</th>
+        <th title="Price implied by the bottom of the confidence interval">Need</th>
+        <th>Your price</th><th>Verdict</th><th>By chance</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
@@ -939,6 +1133,8 @@ function applyFixture() {
   document.getElementById("kickoff").textContent = DATA.fixture.date || "";
   document.getElementById("legend-0").textContent = DATA.teams[0].name;
   document.getElementById("legend-1").textContent = DATA.teams[1].name;
+  document.getElementById("focus-0").textContent = DATA.teams[0].name;
+  document.getElementById("focus-1").textContent = DATA.teams[1].name;
   document.title = `${DATA.fixture.home} v ${DATA.fixture.away}: hit rates`;
 
   fillPlayerStats();
@@ -1033,6 +1229,7 @@ segment("venue", v => { venue = v; render(); if (tab === "players") playerView()
 segment("period", v => { period = v; render(); });
 segment("source", v => { source = v; render(); });
 segment("measure", v => { measure = v; render(); });
+segment("focus", v => { focus = v; render(); });
 segment("scope", v => { scope = v; render(); });
 segment("sort", v => { sort = v; render(); });
 
@@ -1145,8 +1342,49 @@ function standoutSoon() {
   clearTimeout(standoutTimer);
   standoutTimer = setTimeout(standoutView, 140);
 }
+document.getElementById("include-mismatched").addEventListener("click", e => {
+  includeMismatched = !includeMismatched;
+  e.currentTarget.setAttribute("aria-pressed", includeMismatched);
+  standoutView();
+});
+
 document.getElementById("smin").addEventListener("input", standoutSoon);
 document.getElementById("stop").addEventListener("input", standoutSoon);
+
+/* Type a bookmaker's price and the row says whether it clears the bar.
+   The verdict uses the conservative estimate, not the point estimate: it
+   should be hard to get a yes, because most of what a scan like this turns
+   up is noise wearing a good record. */
+document.getElementById("standout").addEventListener("input", e => {
+  const input = e.target.closest("input[data-price]");
+  if (!input) return;
+
+  const row = input.closest("tr");
+  const cell = row.querySelector("[data-verdict]");
+  const price = parseFloat(input.value);
+
+  if (!price || price <= 1) {
+    cell.textContent = "";
+    cell.className = "verdict";
+    return;
+  }
+
+  const pLow = parseFloat(row.dataset.plow);
+  const minPrice = parseFloat(row.dataset.min);
+  const fair = parseFloat(row.dataset.fair);
+  const edge = (price * pLow - 1) * 100;
+
+  if (price >= minPrice) {
+    cell.className = "verdict yes";
+    cell.textContent = `Clears, +${edge.toFixed(1)}%`;
+  } else if (price >= fair) {
+    cell.className = "verdict thin";
+    cell.textContent = "Thin, sample too small";
+  } else {
+    cell.className = "verdict no";
+    cell.textContent = "Under fair value";
+  }
+});
 
 applyFixture();
 """
@@ -1228,6 +1466,15 @@ def build_html(payload: dict) -> str:
   </div>
 
   <div class="control-group">
+    <span class="control-label">Team</span>
+    <div class="seg">
+      <button type="button" data-focus="both" aria-pressed="true">Both</button>
+      <button type="button" data-focus="0" aria-pressed="false" id="focus-0">Home</button>
+      <button type="button" data-focus="1" aria-pressed="false" id="focus-1">Away</button>
+    </div>
+  </div>
+
+  <div class="control-group">
     <span class="control-label">Measure</span>
     <div class="seg">
       <button type="button" data-measure="for" aria-pressed="true">For</button>
@@ -1269,6 +1516,7 @@ def build_html(payload: dict) -> str:
 </div>
 
 <div class="panel" data-panel="team">
+  <div id="mismatch"></div>
   <div class="board" id="board"></div>
 </div>
 
@@ -1308,6 +1556,13 @@ def build_html(payload: dict) -> str:
       <input class="num-input" id="stop" type="number" step="5" min="5" value="20"
              aria-label="How many to show">
     </div>
+    <div class="control-group">
+      <div class="seg">
+        <button type="button" id="include-mismatched" aria-pressed="false"
+                title="Include teams whose record was built in another competition">
+          Include other competitions</button>
+      </div>
+    </div>
   </div>
   <div id="standout"></div>
 </div>
@@ -1318,6 +1573,8 @@ def build_html(payload: dict) -> str:
   left to right. Shaded rows are 80% or above, or 20% or below.
   Matchup puts the home side's own numbers against the away side's conceded ones,
   so you can see whether an attack meets a leak.
+  Where shown, "proj" is what the fitted ratings expect in this fixture against
+  this opponent, which is a different question from what the team has averaged.
   Built {generated} from SofaScore data, covering {scope}.
 </footer>
 

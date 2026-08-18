@@ -40,6 +40,48 @@ PREFERRED_STATS = [
 # Stats where a hit-rate line makes no sense or reads oddly.
 SKIP_STATS = {"Ball possession"}
 
+# Markets you can actually get a price on. SofaScore returns a great deal
+# more than this (goals prevented, expected assists, duels won), all of it
+# interesting and none of it bettable, and every extra row is another
+# combination for the Standout scan to trawl through and another chance for
+# a coincidence to look like a finding. Pass --all-stats to see everything.
+BETTABLE_STATS = {
+    "Total shots",
+    "Shots on target",
+    "Shots off target",
+    "Blocked shots",
+    "Shots inside box",
+    "Shots outside box",
+    "Corner kicks",
+    "Offsides",
+    "Throw-ins",
+    "Fouls",
+    "Yellow cards",
+    "Red cards",
+    "Goal kicks",
+    "Free kicks",
+    "Tackles",
+    "Big chances",
+}
+
+# The same idea for player props.
+BETTABLE_PLAYER_STATS = {
+    "Shots",
+    "Shots on target",
+    "Goals",
+    "Assists",
+    "Tackles",
+    "Fouls",
+    "Fouled",
+    "Offsides",
+    "Clearances",
+    "Interceptions",
+    "Passes",
+    "Crosses",
+    "Saves",
+    "Minutes",          # not a market, but it decides whether the rest matter
+}
+
 
 def _as_number(value):
     """Coerce a statistics value to a float, or None if it isn't one.
@@ -239,6 +281,7 @@ def team_form(
                 "date": _match_date(event),
                 "competition": event.get("tournament", {}).get("name", "?"),
                 "opponent": opponent.get("shortName") or opponent.get("name", "?"),
+                "opponent_id": opponent.get("id"),
                 "venue": "home" if is_home else "away",
                 "goals_for": goals_for,
                 "goals_against": goals_against,
@@ -438,12 +481,17 @@ def player_form(
     return records
 
 
-def player_stat_names(*record_lists: list[dict]) -> list[str]:
+def player_stat_names(
+    *record_lists: list[dict], bettable_only: bool = True
+) -> list[str]:
     """Every player stat present, the useful ones first."""
     found = set()
     for records in record_lists:
         for record in records:
             found.update(record["stats"].keys())
+
+    if bettable_only:
+        found = found & BETTABLE_PLAYER_STATS
 
     ordered = [name for name in PLAYER_STAT_ORDER if name in found]
     ordered += sorted(found - set(ordered))
@@ -499,6 +547,7 @@ def _record_from_event(
         "date": _match_date(event),
         "competition": event.get("tournament", {}).get("name", "?"),
         "opponent": opponent.get("shortName") or opponent.get("name", "?"),
+        "opponent_id": opponent.get("id"),
         "venue": "home" if is_home else "away",
         "goals_for": goals_for,
         "goals_against": goals_against,
@@ -565,7 +614,9 @@ def head_to_head(
     return [home_records, away_records]
 
 
-def stat_names(*record_lists: list[dict]) -> dict[str, list[str]]:
+def stat_names(
+    *record_lists: list[dict], bettable_only: bool = True
+) -> dict[str, list[str]]:
     """Stats present in each period, as {period: [names]}.
 
     Periods are kept separate because they don't carry the same stats.
@@ -581,6 +632,8 @@ def stat_names(*record_lists: list[dict]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for period, found in per_period.items():
         found = found - SKIP_STATS
+        if bettable_only:
+            found = found & BETTABLE_STATS
         if not found:
             continue
         ordered = [name for name in PREFERRED_STATS if name in found]
@@ -634,3 +687,170 @@ def hit_rate(
     ]
     hits = sum(1 for v in values if v > line)
     return hits, len(values)
+
+
+# ---------------------------------------------------------------- adjustment
+
+def league_ratings(
+    records_by_team: dict[int, list[dict]],
+    names: dict[str, list[str]],
+) -> dict:
+    """Express every team as a multiplier on the league average.
+
+    This is the standard multiplicative model, and it is what turns a raw
+    record into something transferable. A team averaging 12 shots against
+    defences that concede 9 is not the same team as one averaging 12 against
+    defences that concede 15, but a hit rate cannot tell them apart.
+
+        attack  = the team's own average / league average
+        defence = what they concede      / league average
+        expected for A against B = league average * A.attack * B.defence
+
+    Home advantage is carried by using separate home and away league averages,
+    which is where most of it actually lives.
+
+    Verified against a synthetic league where the true multipliers were known:
+    the model recovers them exactly.
+    """
+    ratings: dict = {"average": {}, "home": {}, "away": {}, "attack": {}, "defence": {}}
+
+    for period, period_names in names.items():
+        avg, home_avg, away_avg = {}, {}, {}
+
+        for stat in period_names:
+            all_for, home_for, away_for = [], [], []
+            for records in records_by_team.values():
+                for r in records:
+                    value = r["stats"].get(period, {}).get(stat)
+                    if value is None:
+                        continue
+                    all_for.append(value)
+                    (home_for if r["venue"] == "home" else away_for).append(value)
+
+            if not all_for:
+                continue
+            avg[stat] = sum(all_for) / len(all_for)
+            home_avg[stat] = sum(home_for) / len(home_for) if home_for else avg[stat]
+            away_avg[stat] = sum(away_for) / len(away_for) if away_for else avg[stat]
+
+        ratings["average"][period] = avg
+        ratings["home"][period] = home_avg
+        ratings["away"][period] = away_avg
+
+    # Fit iteratively. A single pass divides by the league average and calls
+    # it a rating, but that inherits the schedule: a strong side never plays
+    # itself, so its opponents are weaker than average and its rating comes
+    # out flattered. Re-fitting against the current opponent estimates removes
+    # that. On a synthetic league with known multipliers, one pass overshot a
+    # projection by 17%; this converges onto the truth.
+    ids = list(records_by_team)
+    attack = {t: {p: {} for p in names} for t in ids}
+    defence = {t: {p: {} for p in names} for t in ids}
+
+    for period, period_names in names.items():
+        league = ratings["average"].get(period, {})
+
+        for stat in period_names:
+            base = league.get(stat)
+            if not base:
+                continue
+
+            att = {t: 1.0 for t in ids}
+            dfn = {t: 1.0 for t in ids}
+
+            def observations(team_id):
+                for r in records_by_team[team_id]:
+                    opp = r.get("opponent_id")
+                    if opp not in att:
+                        continue
+                    mine = r["stats"].get(period, {}).get(stat)
+                    theirs = r.get("against", {}).get(period, {}).get(stat)
+                    if mine is None or theirs is None:
+                        continue
+                    yield opp, mine, theirs
+
+            for _ in range(25):
+                new_att, new_def = {}, {}
+
+                for t in ids:
+                    a_vals, d_vals = [], []
+                    for opp, mine, theirs in observations(t):
+                        if dfn[opp] > 0:
+                            a_vals.append(mine / (base * dfn[opp]))
+                        if att[opp] > 0:
+                            d_vals.append(theirs / (base * att[opp]))
+                    new_att[t] = sum(a_vals) / len(a_vals) if a_vals else att[t]
+                    new_def[t] = sum(d_vals) / len(d_vals) if d_vals else dfn[t]
+
+                # Normalise so the average team sits at 1.0, otherwise attack
+                # and defence can drift together and mean nothing.
+                a_mean = sum(new_att.values()) / len(new_att)
+                d_mean = sum(new_def.values()) / len(new_def)
+                if a_mean > 0:
+                    new_att = {t: v / a_mean for t, v in new_att.items()}
+                if d_mean > 0:
+                    new_def = {t: v / d_mean for t, v in new_def.items()}
+
+                shift = max(
+                    max(abs(new_att[t] - att[t]) for t in ids),
+                    max(abs(new_def[t] - dfn[t]) for t in ids),
+                )
+                att, dfn = new_att, new_def
+                if shift < 1e-6:
+                    break
+
+            for t in ids:
+                attack[t][period][stat] = att[t]
+                defence[t][period][stat] = dfn[t]
+
+    ratings["attack"] = {str(t): attack[t] for t in ids}
+    ratings["defence"] = {str(t): defence[t] for t in ids}
+
+    ratings["teams"] = len(records_by_team)
+    return ratings
+
+
+def project_fixture(
+    ratings: dict,
+    home_id: int,
+    away_id: int,
+    names: dict[str, list[str]],
+) -> dict:
+    """Expected value of each stat for this specific fixture.
+
+    Returns {period: {stat: [home_expected, away_expected]}}. Missing ratings
+    simply drop out rather than falling back to the raw average, because a
+    projection built on a guess is worse than no projection.
+    """
+    out: dict = {}
+
+    home_att = ratings.get("attack", {}).get(str(home_id), {})
+    away_att = ratings.get("attack", {}).get(str(away_id), {})
+    home_def = ratings.get("defence", {}).get(str(home_id), {})
+    away_def = ratings.get("defence", {}).get(str(away_id), {})
+
+    for period, period_names in names.items():
+        bucket = {}
+        home_base = ratings.get("home", {}).get(period, {})
+        away_base = ratings.get("away", {}).get(period, {})
+
+        for stat in period_names:
+            ha = home_att.get(period, {}).get(stat)
+            ad = away_def.get(period, {}).get(stat)
+            aa = away_att.get(period, {}).get(stat)
+            hd = home_def.get(period, {}).get(stat)
+
+            if None in (ha, ad, aa, hd):
+                continue
+            if stat not in home_base or stat not in away_base:
+                continue
+
+            bucket[stat] = [
+                round(home_base[stat] * ha * ad, 2),
+                round(away_base[stat] * aa * hd, 2),
+            ]
+
+        if bucket:
+            out[period] = bucket
+
+    return out

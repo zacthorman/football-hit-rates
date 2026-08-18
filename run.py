@@ -8,8 +8,10 @@ Build a fixture hit-rate report.
     python run.py --team 2814 --pick 0,1,2      three fixtures in one report
     python run.py --teams 2814,2833,2817        each team's next fixture
     python run.py --league premier_league       the whole next round
+    python run.py --leagues premier_league,championship,la_liga
 
-Add --players for per-player stats, --h2h for previous meetings.
+Add --players for per-player stats, --h2h for previous meetings,
+--adjust for opponent-adjusted projections.
 
 One report can hold several fixtures with a dropdown to switch between them.
 Teams in the same league share matches, and everything is cached, so the
@@ -108,8 +110,54 @@ def team_next_fixture(team_id: int, tournament_id: int | None = None) -> dict | 
     return near.get("nextEvent") or near.get("previousEvent")
 
 
+_RATINGS_CACHE: dict = {}
+
+
+def league_ratings_for(tournament_id: int | None, games: int) -> tuple[dict, dict] | None:
+    """Fit attack and defence ratings for a whole competition.
+
+    Expensive the first time (every club's recent form) and free afterwards,
+    because the cache means a league round reuses matches it was fetching
+    anyway. Without ratings for the rest of the division there is nothing to
+    measure a team against, which is the whole point of the exercise.
+    """
+    if tournament_id is None:
+        return None
+    if tournament_id in _RATINGS_CACHE:
+        return _RATINGS_CACHE[tournament_id]
+
+    ids = api.tournament_team_ids(tournament_id)
+    if len(ids) < 4:
+        print("  not enough teams in the table to fit ratings, skipping adjustment")
+        _RATINGS_CACHE[tournament_id] = None
+        return None
+
+    print(f"  fitting ratings from {len(ids)} teams (first run is slow, then cached)")
+    by_team = {}
+    for i, team_id in enumerate(ids, start=1):
+        recs = hitrates.team_form(
+            team_id=team_id, team_name=f"team {team_id}",
+            tournament_id=tournament_id, limit=games, verbose=False,
+        )
+        if recs:
+            by_team[team_id] = recs
+        print(f"    {i}/{len(ids)} teams", end="\r")
+
+    if len(by_team) < 4:
+        _RATINGS_CACHE[tournament_id] = None
+        return None
+
+    names = hitrates.stat_names(*by_team.values())
+    ratings = hitrates.league_ratings(by_team, names)
+    print(f"    fitted from {len(by_team)} teams              ")
+
+    _RATINGS_CACHE[tournament_id] = (ratings, names)
+    return _RATINGS_CACHE[tournament_id]
+
+
 def build_fixture(
-    event: dict, games: int, players: bool, h2h: bool = False
+    event: dict, games: int, players: bool, h2h: bool = False,
+    adjust: bool = False, all_stats: bool = False,
 ) -> dict | None:
     """Gather everything the report needs for one fixture."""
     home = event["homeTeam"]
@@ -135,7 +183,7 @@ def build_fixture(
         print("  no statistics for either team, skipping this fixture")
         return None
 
-    names = hitrates.stat_names(*records)
+    names = hitrates.stat_names(*records, bettable_only=not all_stats)
     lines = hitrates.suggest_lines(records, names)
 
     kickoff = ""
@@ -152,6 +200,7 @@ def build_fixture(
             "competition": tournament.get("name", "Football"),
             "date": kickoff,
             "kickoff": event.get("startTimestamp", 0),
+            "tournamentId": unique_id,
         },
         "teams": [
             {"name": home["name"], "side": "home"},
@@ -162,6 +211,17 @@ def build_fixture(
         "lines": lines,
     }
 
+    if adjust:
+        fitted = league_ratings_for(unique_id, games)
+        if fitted:
+            ratings, league_names = fitted
+            projection = hitrates.project_fixture(
+                ratings, home["id"], away["id"], league_names
+            )
+            if projection:
+                entry["projection"] = projection
+                entry["ratingTeams"] = ratings.get("teams", 0)
+
     if h2h:
         h2h_records = hitrates.head_to_head(
             event_id=event["id"], home_id=home["id"], away_id=away["id"], limit=games
@@ -170,7 +230,7 @@ def build_fixture(
             entry["h2h"] = h2h_records
             # H2H needs its own lines: two teams meeting each other produce
             # different numbers from their form against everyone else.
-            h2h_names = hitrates.stat_names(*h2h_records)
+            h2h_names = hitrates.stat_names(*h2h_records, bettable_only=not all_stats)
             entry["h2hStats"] = h2h_names
             entry["h2hLines"] = hitrates.suggest_lines(h2h_records, h2h_names)
         else:
@@ -188,7 +248,9 @@ def build_fixture(
             for team in (home, away)
         ]
         entry["players"] = player_records
-        entry["playerStats"] = hitrates.player_stat_names(*player_records)
+        entry["playerStats"] = hitrates.player_stat_names(
+            *player_records, bettable_only=not all_stats
+        )
         entry["playerLines"] = hitrates.suggest_player_lines(
             player_records, entry["playerStats"]
         )
@@ -199,12 +261,13 @@ def build_fixture(
 
 def build(
     events: list[dict], games: int, open_browser: bool,
-    players: bool, h2h: bool = False,
+    players: bool, h2h: bool = False, adjust: bool = False,
+    all_stats: bool = False,
 ) -> Path:
     fixtures = []
     for i, event in enumerate(events, start=1):
         print(f"\n[{i}/{len(events)}]", end="")
-        entry = build_fixture(event, games, players, h2h)
+        entry = build_fixture(event, games, players, h2h, adjust, all_stats)
         if entry:
             fixtures.append(entry)
 
@@ -218,8 +281,14 @@ def build(
 
     OUT_DIR.mkdir(exist_ok=True)
     first = fixtures[0]["fixture"]
+    comps = {f["fixture"]["competition"] for f in fixtures}
+
     if len(fixtures) == 1:
         slug = f"{first['home']}-v-{first['away']}"
+    elif len(comps) == 1:
+        # A whole division's round. Name it after the competition so each
+        # league keeps its own file instead of overwriting the last one.
+        slug = f"{first['competition']}-{len(fixtures)}-fixtures"
     else:
         slug = f"{len(fixtures)}-fixtures-{first['home']}"
     slug = "".join(c for c in slug.lower().replace(" ", "-") if c.isalnum() or c == "-")
@@ -280,7 +349,7 @@ def demo() -> Path:
                  "Sevilla", "Athletic", "Osasuna", "Sociedad", "Getafe"]
     positions = ["G", "D", "D", "D", "M", "M", "F", "F", "M", "M"]
 
-    def make_matches(strength: float) -> list[dict]:
+    def make_matches(strength: float, competition: str = "LaLiga (demo data)") -> list[dict]:
         matches = []
         for i in range(10):
             full = {
@@ -308,6 +377,7 @@ def demo() -> Path:
                 "goals_for": rng.randint(0, 3),
                 "goals_against": rng.randint(0, 3),
                 "result": rng.choice(["W", "D", "L"]),
+                "competition": competition,
                 "stats": {"ALL": full, "1ST": first, "2ND": second},
                 "against": {"ALL": opp, "1ST": opp_first, "2ND": opp_second},
             })
@@ -353,7 +423,8 @@ def demo() -> Path:
     }
 
     def one(home: str, away: str) -> dict:
-        matches = [make_matches(1.15), make_matches(0.9)]
+        # Second side is a "promoted" team, so the mismatch guard is visible.
+        matches = [make_matches(1.15), make_matches(0.9, "Segunda (demo data)")]
         names = hitrates.stat_names(*matches)
         meetings = [make_matches(1.05)[:6], make_matches(0.95)[:6]]
         h2h_names = hitrates.stat_names(*meetings)
@@ -376,6 +447,11 @@ def demo() -> Path:
             "players": players,
             "playerStats": pnames,
             "playerLines": hitrates.suggest_player_lines(players, pnames),
+            "projection": {
+                "ALL": {name: [round(mean * 1.15 * 0.8, 1), round(mean * 0.7, 1)]
+                        for name, mean, _ in team_stats},
+            },
+            "ratingTeams": 20,
             "h2h": meetings,
             "h2hStats": h2h_names,
             "h2hLines": hitrates.suggest_lines(meetings, h2h_names),
@@ -417,9 +493,21 @@ def main() -> None:
         "--league",
         help="a whole competition's next round, e.g. premier_league, la_liga",
     )
+    parser.add_argument(
+        "--leagues",
+        help="several competitions, comma separated. One report each.",
+    )
     parser.add_argument("--pick", help="index, or comma-separated indices, from the list")
     parser.add_argument("--games", type=int, default=10, help="matches per team")
     parser.add_argument("--show", type=int, default=5, help="how many fixtures to list")
+    parser.add_argument(
+        "--all-stats", action="store_true", dest="all_stats",
+        help="keep every stat, not just the ones you can bet on",
+    )
+    parser.add_argument(
+        "--adjust", action="store_true",
+        help="fit opponent-adjusted ratings and project this fixture",
+    )
     parser.add_argument(
         "--h2h", action="store_true",
         help="also fetch previous meetings between the two teams",
@@ -440,6 +528,35 @@ def main() -> None:
         do_search(args.search)
         return
 
+    # Several divisions in one go. Each gets its own report rather than one
+    # enormous file, so the index reads as a list of rounds and no single
+    # page has to carry a hundred fixtures.
+    if args.leagues:
+        wanted = [x.strip() for x in args.leagues.split(",") if x.strip()]
+        built, failed = [], []
+        for name in wanted:
+            print(f"\n{'=' * 60}\n{name}\n{'=' * 60}")
+            try:
+                sub = argparse.Namespace(**vars(args))
+                sub.leagues = None
+                sub.league = name
+                sub.no_open = True
+                main_for(sub)
+                built.append(name)
+            except SystemExit as exc:
+                print(f"  {name} failed: {exc}")
+                failed.append(name)
+
+        print(f"\n\nBuilt {len(built)} report(s): {', '.join(built) or 'none'}")
+        if failed:
+            print(f"Failed: {', '.join(failed)}")
+        print("Now run: python make_index.py")
+        return
+
+    main_for(args)
+
+
+def main_for(args) -> None:
     league_filter = None
 
     # A whole competition: read the team list off the league table, then
@@ -495,7 +612,8 @@ def main() -> None:
         for event in events:
             print(f"  {describe(event)}")
 
-        build(events, args.games, not args.no_open, args.players, args.h2h)
+        build(events, args.games, not args.no_open, args.players,
+              args.h2h, args.adjust, args.all_stats)
         return
 
     if args.team is None:
@@ -517,7 +635,7 @@ def main() -> None:
 
     picks = parse_picks(args.pick, len(events))
     build([events[i] for i in picks], args.games, not args.no_open,
-          args.players, args.h2h)
+          args.players, args.h2h, args.adjust, args.all_stats)
 
 
 if __name__ == "__main__":

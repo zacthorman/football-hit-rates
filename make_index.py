@@ -117,8 +117,13 @@ def main() -> None:
     competitions = sorted({f["competition"] for f in fixtures})
     generated = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
 
+    # A stamp that changes whenever any report changes, used to bust the
+    # browser cache on the links below.
+    stamp = str(int(max((p.stat().st_mtime for p in files), default=0)))
+
     payload = json.dumps(
-        {"fixtures": fixtures, "competitions": competitions, "built": generated},
+        {"fixtures": fixtures, "competitions": competitions,
+         "built": generated, "stamp": stamp},
         separators=(",", ":"),
     )
 
@@ -357,8 +362,13 @@ function renderList() {
       const played = f.kickoff && f.kickoff <= now;
       const tags = (f.players ? '<span class="tag">players</span>' : "")
                  + (f.adjusted ? '<span class="tag">adjusted</span>' : "");
+      // ?v= is the build stamp. It changes every time the index is rebuilt,
+      // so the browser is forced to fetch the report rather than serve a copy
+      // it cached before the report was re-rendered. Without this a fixed
+      // report looks unfixed for as long as the cache holds, which is the
+      // most confusing possible failure.
       return `<li class="${played ? "played" : ""}">
-        <a href="reports/${escapeAttr(f.report)}#e${f.id}">
+        <a href="reports/${escapeAttr(f.report)}?v=${DATA.stamp}#e${f.id}">
           <span class="time">${timeLabel(f.kickoff)}</span>
           <span class="match">
             <span class="teams">${escapeHtml(f.home)} v ${escapeHtml(f.away)}</span>${tags}

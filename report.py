@@ -103,14 +103,29 @@ header { margin-bottom: 18px; }
 }
 h1 { font-size: 30px; font-weight: 680; margin: 0 0 5px; letter-spacing: -0.015em; }
 .kickoff { color: var(--text-secondary); font-size: 14px; }
-.back {
-  display: inline-flex; align-items: center; gap: 6px;
-  color: var(--text-secondary); text-decoration: none;
-  font-size: 13.5px; font-weight: 600; margin-bottom: 12px;
-  border: 1px solid var(--border); background: var(--surface-1);
-  border-radius: 8px; padding: 6px 12px;
+/* Sticky, not just placed at the top. A report runs to thousands of rows, so
+   a back link that scrolls away is a back link you do not have. On a phone
+   that meant reaching for the browser's own back button every time.
+
+   It sits as a direct child of .wrap rather than inside <header>, because a
+   sticky element only sticks while its own parent is still on screen. Inside
+   the header it unstuck the instant the title scrolled past, which looked
+   exactly like sticky not working at all. */
+.back-bar {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--page); padding: 10px 0 10px;
+  margin: -10px 0 12px;
 }
-.back:hover { color: var(--text-primary); }
+.back {
+  display: inline-flex; align-items: center; gap: 7px;
+  color: var(--text-primary); text-decoration: none;
+  font-size: 15px; font-weight: 640;
+  border: 1px solid var(--border); background: var(--surface-1);
+  border-radius: 9px; padding: 9px 15px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+}
+.back:hover { background: var(--tint); }
+.back:active { transform: translateY(1px); }
 
 /* ----------------------------------------------------------- controls */
 
@@ -2122,8 +2137,9 @@ def build_html(payload: dict) -> str:
 <body>
 <div class="wrap">
 
+<div class="back-bar"><a class="back" href="../index.html">&lsaquo;&nbsp; All fixtures</a></div>
+
 <header>
-  <a class="back" href="../index.html">&lsaquo; All fixtures</a>
   <div class="competition" id="competition">{fixture.get('competition', 'Football')}</div>
   <h1 id="title">{fixture['home']} v {fixture['away']}</h1>
   <div class="kickoff" id="kickoff">{fixture.get('date', '')}</div>

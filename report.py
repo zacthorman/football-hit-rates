@@ -547,6 +547,22 @@ function mismatchWarning() {
   </div>`;
 }
 
+/* Why a projection is missing. The opponent-adjusted model can only rate a
+   team against opponents it has also rated, so a promoted club with ten
+   Championship matches on file has almost nothing usable. Left unsaid, that
+   showed up as Coventry projected for more corners at the Emirates than
+   Arsenal, off a single match. Saying it out loud is the fix. */
+function ratingsWarning() {
+  const notes = DATA.ratingNotes || [];
+  if (!notes.length) return "";
+  return `<div class="warn">
+    <strong>No adjusted projection.</strong> ${notes.join("; ")}.
+    The raw hit rates below are still real, but nothing has corrected them
+    for the standard of opposition, so read them as what happened rather
+    than what to expect.
+  </div>`;
+}
+
 function summarise(rows, statName, line, which) {
   const vals = rows.map(r => statValue(r, statName, which))
                    .filter(v => v !== undefined && v !== null);
@@ -781,7 +797,8 @@ function render() {
       </div>
     </div>`).join("");
 
-  document.getElementById("mismatch").innerHTML = mismatchWarning();
+  document.getElementById("mismatch").innerHTML =
+    mismatchWarning() + ratingsWarning();
   updateAll();
 }
 

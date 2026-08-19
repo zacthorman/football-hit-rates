@@ -227,6 +227,24 @@ def build_fixture(
                 entry["projection"] = projection
                 entry["ratingTeams"] = ratings.get("teams", 0)
 
+            # A projection is only as good as the matches behind it. A
+            # promoted club's recent form was played against opponents who
+            # are not in this division, so almost none of it can be used, and
+            # saying so beats printing a confident wrong number.
+            floor = ratings.get("minMatches", 0)
+            thin = []
+            for team in (home, away):
+                usable = hitrates.rating_coverage(ratings, team["id"])
+                if usable < floor:
+                    thin.append(
+                        f"{team['name']}: only {usable} of their recent matches "
+                        f"were against a team in this division, so no "
+                        f"opponent-adjusted projection is shown for them"
+                    )
+                    print(f"  {thin[-1]}")
+            if thin:
+                entry["ratingNotes"] = thin
+
     if h2h:
         h2h_records = hitrates.head_to_head(
             event_id=event["id"], home_id=home["id"], away_id=away["id"], limit=games

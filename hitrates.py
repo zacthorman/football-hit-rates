@@ -685,9 +685,21 @@ def hit_rate(
 
 # ---------------------------------------------------------------- adjustment
 
+# A rating is only meaningful if it was fitted against opponents whose own
+# ratings are known. A promoted club's last ten matches were all played in a
+# division nobody else here belongs to, so almost every one of them is
+# unusable, and what survives is one or two games fitted in a closed loop
+# against the only other promoted side. That produced Coventry City rated as
+# a better defensive corner side than Arsenal off a single Championship
+# match. Below this many usable matches the rating is dropped rather than
+# published, and project_fixture then omits the stat entirely.
+MIN_RATED_MATCHES = 4
+
+
 def league_ratings(
     records_by_team: dict[int, list[dict]],
     names: dict[str, list[str]],
+    min_matches: int = MIN_RATED_MATCHES,
 ) -> dict:
     """Express every team as a multiplier on the league average.
 
@@ -707,6 +719,9 @@ def league_ratings(
     the model recovers them exactly.
     """
     ratings: dict = {"average": {}, "home": {}, "away": {}, "attack": {}, "defence": {}}
+    # How many matches each rating was actually fitted from, so the report
+    # can say why a projection is missing instead of silently omitting it.
+    samples: dict = {t: {p: {} for p in names} for t in records_by_team}
 
     for period, period_names in names.items():
         avg, home_avg, away_avg = {}, {}, {}
@@ -793,15 +808,35 @@ def league_ratings(
                 if shift < 1e-6:
                     break
 
+            # Count what each rating was actually built from, then drop the
+            # ones that rest on too little. A team can appear in the fit and
+            # still have almost no usable matches, because every opponent it
+            # faced was outside this division.
             for t in ids:
-                attack[t][period][stat] = att[t]
-                defence[t][period][stat] = dfn[t]
+                usable = sum(1 for _ in observations(t))
+                samples[t][period][stat] = usable
+                if usable >= min_matches:
+                    attack[t][period][stat] = att[t]
+                    defence[t][period][stat] = dfn[t]
 
     ratings["attack"] = {str(t): attack[t] for t in ids}
     ratings["defence"] = {str(t): defence[t] for t in ids}
+    ratings["samples"] = {str(t): samples[t] for t in ids}
+    ratings["minMatches"] = min_matches
 
     ratings["teams"] = len(records_by_team)
     return ratings
+
+
+def rating_coverage(ratings: dict, team_id: int, period: str = "ALL") -> int:
+    """How many usable matches this team's ratings were fitted from.
+
+    Usable means the opponent was also in the fit. A promoted club scores
+    near zero here even with ten matches on file, which is exactly the case
+    that needs explaining rather than hiding.
+    """
+    block = ratings.get("samples", {}).get(str(team_id), {}).get(period, {})
+    return max(block.values()) if block else 0
 
 
 def project_fixture(

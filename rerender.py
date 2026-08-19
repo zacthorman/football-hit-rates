@@ -29,6 +29,11 @@ from pathlib import Path
 
 import report
 
+# Note this file imports report, not hitrates. Re-rendering a saved page is a
+# pure formatting job: the data is already in the file. Keeping the API stack
+# out of this path means it still works on a machine that has never installed
+# curl_cffi, which is exactly the situation it is most useful in.
+
 ROOT = Path(__file__).parent
 REPORTS = ROOT / "reports"
 

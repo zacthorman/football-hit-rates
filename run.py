@@ -68,6 +68,39 @@ def do_search(query: str) -> None:
     print("\nRe-run with --team ID.\n")
 
 
+def resolve_names(text: str) -> list[int]:
+    """Club names to team ids, one search request each.
+
+    Exists because the fixtures-by-date endpoint is dead, so everything has to
+    start from a team, and hunting twelve ids by hand before a kick-off is not
+    a thing anyone will do. Ambiguity is resolved towards an exact name match
+    first, then the shortest name, because searching "Basel" should give you
+    Basel rather than Basel Under 19.
+    """
+    ids: list[int] = []
+    for raw in text.split(","):
+        name = raw.strip()
+        if not name:
+            continue
+
+        teams = api.search_teams(name)
+        if not teams:
+            print(f"  no team found for '{name}'")
+            continue
+
+        exact = [t for t in teams if t["name"].lower() == name.lower()]
+        pool = exact or teams
+        pick = min(pool, key=lambda t: len(t["name"]))
+
+        country = pick.get("country", {}).get("name", "")
+        note = "" if len(teams) == 1 else f"  (from {len(teams)} matches)"
+        print(f"  {name:<22} -> {pick['name']} {country and f'({country})'} "
+              f"id {pick['id']}{note}")
+        ids.append(pick["id"])
+
+    return ids
+
+
 def list_fixtures(events: list[dict], team_name: str) -> None:
     if not events:
         print(f"\nNo upcoming fixtures found for {team_name}.")
@@ -634,6 +667,12 @@ def main() -> None:
     parser.add_argument("--team", type=int, help="team id, from --search")
     parser.add_argument("--teams", help="comma-separated team ids, next fixture of each")
     parser.add_argument(
+        "--names",
+        help="comma-separated club NAMES, resolved to ids automatically, then "
+             "the next fixture of each. Use when you know who is playing but "
+             "not their ids: --names \"Benfica,Fenerbahce,Basel\"",
+    )
+    parser.add_argument(
         "--league",
         help="a whole competition's next round, e.g. premier_league, la_liga",
     )
@@ -738,6 +777,15 @@ def main_for(args) -> None:
         print(f"  {len(ids)} teams")
         args.teams = ",".join(str(i) for i in ids)
         league_filter = tournament_id
+
+    # Names first: resolve them to ids and then fall through to exactly the
+    # same path --teams uses, so there is only one code path to trust.
+    if args.names:
+        print("Resolving club names...")
+        found = resolve_names(args.names)
+        if not found:
+            raise SystemExit("None of those names resolved to a team.")
+        args.teams = ",".join(str(i) for i in found)
 
     # Several teams: take each one's next fixture, de-duplicated in case two
     # of them happen to be playing each other.

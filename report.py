@@ -17,6 +17,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import markets
+
 CSS = """
 :root {
   color-scheme: light;
@@ -992,6 +994,7 @@ function scanLines(minSample) {
     Object.keys(fx.lines || {}).forEach(per => {
       const lines = fx.lines[per] || {};
       (fx.stats[per] || []).forEach(name => {
+        if (!BETTABLE.has(name)) return;
         const line = lines[name];
         if (line === undefined) return;
 
@@ -1083,6 +1086,15 @@ function scanLines(minSample) {
 
 const MATCHUP_FLOOR = 0.65;   // each side must clear this on its own
 
+/* The markets that actually exist. Injected from hitrates.py so there is one
+   list, not two that drift apart.
+
+   The scans filter on this rather than trusting the payload, because a report
+   built before the bettable filter existed still carries every stat SofaScore
+   returns, and re-rendering the page cannot change what is baked into its
+   data. That is how "under 0.5 hit woodwork" ended up in a list of bets. */
+const BETTABLE = new Set(__BETTABLE__);
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -1109,6 +1121,7 @@ function scanMatchups(minSample) {
       const lines = fx.lines[per] || {};
 
       (fx.stats[per] || []).forEach(name => {
+        if (!BETTABLE.has(name)) return;
         const suggested = lines[name];
         if (suggested === undefined) return;
 
@@ -1244,7 +1257,7 @@ function scanMatchups(minSample) {
 
 function bestBetsView() {
   const minSample = parseInt(document.getElementById("bmin").value, 10) || 4;
-  const limit = parseInt(document.getElementById("btop").value, 10) || 3;
+  const limit = parseInt(document.getElementById("btop").value, 10) || 10;
   const { found, combos, skipped } = scanMatchups(minSample);
 
   const periodName = p => (ALL.periods && ALL.periods[p]) || p;
@@ -2123,6 +2136,7 @@ def build_html(payload: dict) -> str:
     names = [team["name"] for team in first["teams"]]
 
     generated = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
+    bettable = json.dumps(sorted(markets.BETTABLE_STATS))
     count = len(payload["fixtures"])
     scope = f"{count} fixtures" if count > 1 else "1 fixture"
 
@@ -2299,7 +2313,7 @@ def build_html(payload: dict) -> str:
     </div>
     <div class="control-group">
       <span class="control-label">Per competition</span>
-      <input class="num-input" id="btop" type="number" step="1" min="1" max="10" value="3"
+      <input class="num-input" id="btop" type="number" step="1" min="1" max="25" value="10"
              aria-label="How many per competition">
     </div>
   </div>
@@ -2352,7 +2366,7 @@ def build_html(payload: dict) -> str:
 </footer>
 
 </div>
-<script>{JS.replace("__PAYLOAD__", json.dumps(payload))}</script>
+<script>{JS.replace("__PAYLOAD__", json.dumps(payload)).replace("__BETTABLE__", bettable)}</script>
 </body>
 </html>
 """

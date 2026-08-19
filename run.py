@@ -40,9 +40,13 @@ def describe(event: dict) -> str:
         when = datetime.fromtimestamp(
             event["startTimestamp"], tz=timezone.utc
         ).strftime("%a %d %b %H:%M")
+    # The event id is shown because track.py needs it, and hunting for it
+    # in a URL is a silly thing to make someone do.
     return (
         f"{when:>16}  {event['homeTeam']['name']} v {event['awayTeam']['name']}"
-        f"  ({tournament})"
+        f"  ({tournament})\n"
+        f"{'':>18}event {event['id']}   "
+        f"home {event['homeTeam']['id']}   away {event['awayTeam']['id']}"
     )
 
 
@@ -71,7 +75,8 @@ def list_fixtures(events: list[dict], team_name: str) -> None:
     print(f"\nNext fixtures for {team_name}:\n")
     for i, event in enumerate(events):
         print(f"  [{i}] {describe(event)}")
-    print("\nRe-run with --pick N to build a report.\n")
+    print("\nRe-run with --pick N to build a report.")
+    print("Log a pick with:  python track.py add --event ID --team TEAM_ID ...\n")
 
 
 def team_next_fixture(team_id: int, tournament_id: int | None = None) -> dict | None:

@@ -310,6 +310,28 @@ select, .num-input {
 .verdict.thin { color: var(--text-secondary); }
 .verdict.no { color: var(--miss); }
 .sub-line { color: var(--muted); font-size: 12px; font-weight: 500; display: block; }
+.score { font-size: 26px; font-weight: 720; font-variant-numeric: tabular-nums; line-height: 1; }
+.score.good { color: var(--hit); }
+.score.poor { color: var(--miss); }
+.breakdown { font-size: 12px; color: var(--muted); margin-top: 5px; }
+.breakdown span { white-space: nowrap; margin-right: 10px; }
+.add-btn {
+  border: 1px solid var(--border); background: var(--control-bg);
+  color: var(--text-secondary); border-radius: 7px;
+  font: inherit; font-size: 12.5px; padding: 5px 10px; cursor: pointer;
+  white-space: nowrap;
+}
+.add-btn:hover { color: var(--text-primary); }
+.add-btn[data-in="1"] { background: var(--control-active); color: var(--control-active-text); }
+.totals {
+  display: flex; flex-wrap: wrap; gap: 26px;
+  padding: 16px 18px; margin-bottom: 16px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+}
+.total-item .k {
+  font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
+}
+.total-item .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .proj {
   margin-top: 7px; font-size: 12.5px; color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
@@ -905,12 +927,17 @@ function scanLines(minSample) {
   return { found, combos, skipped };
 }
 
+function rowKey(r) {
+  return [r.fixtureIndex, r.teamIndex, r.stat, r.period, r.line, r.over].join("|");
+}
+
 function standoutView() {
   const minSample = parseInt(document.getElementById("smin").value, 10) || 6;
   const limit = parseInt(document.getElementById("stop").value, 10) || 20;
 
   const { found, combos, skipped } = scanLines(minSample);
   const shown = found.slice(0, limit);
+  window.__shown = shown;
 
   const periodName = p => (ALL.periods && ALL.periods[p]) || p;
 
@@ -948,6 +975,9 @@ function standoutView() {
                data-price aria-label="Bookmaker price for ${r.stat}"></td>
       <td class="verdict" data-verdict data-label="Verdict"></td>
       <td class="chance" data-label="By chance">${(r.chance * 100).toFixed(1)}%</td>
+      <td><button type="button" class="add-btn" data-add="${i}"
+            data-in="${SLIP.some(s => s.key === rowKey(r)) ? 1 : 0}">
+            ${SLIP.some(s => s.key === rowKey(r)) ? "Added" : "Add"}</button></td>
     </tr>`;
   }).join("");
 
@@ -979,7 +1009,133 @@ function standoutView() {
         <th>Stat</th><th>Line</th><th>Record</th>
         <th title="Price implied by the hit rate itself">Fair</th>
         <th title="Price implied by the bottom of the confidence interval">Need</th>
-        <th>Your price</th><th>Verdict</th><th>By chance</th>
+        <th>Your price</th><th>Verdict</th><th>By chance</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+/* ------------------------------------------------------------------ slip
+
+   A score out of 100, built from four things that can each be justified
+   rather than one number pulled out of the air. The breakdown is always
+   shown, because a score you cannot interrogate is just an opinion with a
+   number stuck on it.
+
+   Value carries the most weight by a distance, and deliberately so. The
+   record tells you what happened; only the price tells you whether the bet
+   is worth making. A 10/10 record at 1.10 is a bad bet and a 6/10 record at
+   4.00 may be a good one. */
+const SLIP = [];
+
+function scorePick(r, price) {
+  const parts = {};
+
+  // Value: how far the price beats what the evidence supports. Zero without
+  // a price, because without one there is nothing to judge.
+  if (!price || price <= 1) {
+    parts.value = 0;
+  } else {
+    const need = 1 / r.score;                 // r.score is the Wilson lower bound
+    const ratio = price / need;
+    parts.value = Math.max(0, Math.min(45, Math.round((ratio - 0.85) * 150)));
+  }
+
+  // Evidence: how much data sits behind it.
+  parts.evidence = Math.max(0, Math.min(25, Math.round((r.n - 4) * 2.5)));
+
+  // Agreement: does the opponent-adjusted projection point the same way?
+  const proj = ((ALL.fixtures[r.fixtureIndex].projection || {})[r.period] || {})[r.stat];
+  if (proj === undefined) {
+    parts.agreement = 7;                      // unknown, so neither rewarded nor punished
+  } else {
+    const expected = proj[r.teamIndex];
+    const agrees = r.over ? expected > r.line : expected < r.line;
+    parts.agreement = agrees ? 15 : 0;
+  }
+
+  // Context: was the record built against the right standard of opposition?
+  const fx = ALL.fixtures[r.fixtureIndex];
+  const sample = fx.records[r.teamIndex].slice(-games);
+  const matching = sample.filter(
+    x => (x.competition || "?") === fx.fixture.competition
+  ).length;
+  parts.context = sample.length && matching / sample.length >= 0.6 ? 15 : 0;
+
+  const total = parts.value + parts.evidence + parts.agreement + parts.context;
+  return { total, parts };
+}
+
+function slipView() {
+  const el = document.getElementById("slip");
+
+  if (!SLIP.length) {
+    el.innerHTML = `<p class="empty">
+      Nothing added yet. Open Standout lines and press "Add" on any row.
+    </p>`;
+    return;
+  }
+
+  const rows = SLIP.map((entry, i) => {
+    const r = entry.row;
+    const { total, parts } = scorePick(r, entry.price);
+    const cls = total >= 65 ? "good" : total < 40 ? "poor" : "";
+
+    return `<tr data-slip="${i}">
+      <td class="player-name">${r.stat}
+        <span class="pos">${(ALL.periods || {})[r.period] || r.period}</span>
+        <span class="sub-line">${r.team} &middot; ${r.over ? "Over" : "Under"} ${r.line}
+          &middot; ${r.fixture}</span></td>
+      <td class="num" data-label="Record">${r.k}/${r.n}</td>
+      <td class="odds" data-label="Need">${fmtOdds(1 / r.score)}</td>
+      <td data-label="Your price">
+        <input class="price-input" type="number" step="0.05" min="1.01"
+               value="${entry.price || ""}" data-slip-price
+               aria-label="Price for ${r.stat}"></td>
+      <td data-label="Score">
+        <div class="score ${cls}">${total}</div>
+        <div class="breakdown">
+          <span>value ${parts.value}/45</span>
+          <span>evidence ${parts.evidence}/25</span>
+          <span>model ${parts.agreement}/15</span>
+          <span>context ${parts.context}/15</span>
+        </div>
+      </td>
+      <td><button type="button" class="add-btn" data-remove="${i}">Remove</button></td>
+    </tr>`;
+  }).join("");
+
+  // What happens if you put them together.
+  const priced = SLIP.filter(s => s.price > 1);
+  let combo = "";
+
+  if (priced.length > 1) {
+    const combined = priced.reduce((acc, s) => acc * s.price, 1);
+    const chance = priced.reduce((acc, s) => acc * s.row.score, 1);
+    const fair = 1 / chance;
+    const perLeg = Math.pow(fair / combined, 1 / priced.length);
+
+    combo = `<div class="caution">
+      <strong>Putting ${priced.length} of these together.</strong>
+      Combined price <strong>${fmtOdds(combined)}</strong>, against a fair price of
+      <strong>${fmtOdds(fair)}</strong> on the conservative estimates.
+      ${combined >= fair
+        ? "That clears, but only if the legs are genuinely independent, and they rarely are."
+        : `You would need each leg to be about <strong>${((perLeg - 1) * 100).toFixed(1)}%</strong>
+           better priced than it is for this to break even.`}
+      <br><br>
+      Worth knowing what multiples do. The bookmaker's margin compounds with every
+      leg: at a typical 5% per market, a treble carries about 16% against you and a
+      five-fold about 28%. Singles are where value survives. Accumulators are the
+      most profitable product in the shop, and not for the person buying them.
+    </div>`;
+  }
+
+  el.innerHTML = `${combo}
+    <div class="board"><table class="ptable">
+      <thead><tr>
+        <th>Selection</th><th>Record</th><th>Need</th>
+        <th>Your price</th><th>Score</th><th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
@@ -1151,6 +1307,7 @@ function switchTab(target) {
     p.hidden = p.dataset.panel !== target);
   if (target === "players") playerView();
   if (target === "standout") standoutView();
+  if (target === "slip") slipView();
 }
 
 /* ---------------------------------------------------------------- wiring */
@@ -1348,6 +1505,43 @@ document.getElementById("include-mismatched").addEventListener("click", e => {
   standoutView();
 });
 
+document.getElementById("standout").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-add]");
+  if (!btn) return;
+  const r = (window.__shown || [])[parseInt(btn.dataset.add, 10)];
+  if (!r) return;
+
+  const key = rowKey(r);
+  const at = SLIP.findIndex(s => s.key === key);
+  if (at >= 0) {
+    SLIP.splice(at, 1);
+  } else {
+    const priceInput = btn.closest("tr").querySelector("input[data-price]");
+    SLIP.push({ key, row: r, price: parseFloat(priceInput?.value) || 0 });
+  }
+  standoutView();
+  slipView();
+  document.getElementById("slip-count").textContent = SLIP.length ? ` (${SLIP.length})` : "";
+});
+
+document.getElementById("slip").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-remove]");
+  if (!btn) return;
+  SLIP.splice(parseInt(btn.dataset.remove, 10), 1);
+  slipView();
+  standoutView();
+  document.getElementById("slip-count").textContent = SLIP.length ? ` (${SLIP.length})` : "";
+});
+
+document.getElementById("slip").addEventListener("input", e => {
+  const input = e.target.closest("input[data-slip-price]");
+  if (!input) return;
+  const i = parseInt(input.closest("tr").dataset.slip, 10);
+  SLIP[i].price = parseFloat(input.value) || 0;
+  clearTimeout(window.__slipTimer);
+  window.__slipTimer = setTimeout(slipView, 200);
+});
+
 document.getElementById("smin").addEventListener("input", standoutSoon);
 document.getElementById("stop").addEventListener("input", standoutSoon);
 
@@ -1513,6 +1707,7 @@ def build_html(payload: dict) -> str:
   <button type="button" data-tab="team" aria-selected="true">Team stats</button>
   <button type="button" data-tab="players" aria-selected="false">Players</button>
   <button type="button" data-tab="standout" aria-selected="false">Standout lines</button>
+  <button type="button" data-tab="slip" aria-selected="false">My slip<span id="slip-count"></span></button>
 </div>
 
 <div class="panel" data-panel="team">
@@ -1565,6 +1760,17 @@ def build_html(payload: dict) -> str:
     </div>
   </div>
   <div id="standout"></div>
+</div>
+
+<div class="panel" data-panel="slip" hidden>
+  <p class="note">
+    Each selection scored out of 100 on four things: how far the price beats what
+    the evidence supports (45), how much data sits behind it (25), whether the
+    opponent-adjusted projection agrees (15), and whether the record was built
+    against the right standard of opposition (15). The breakdown is always shown,
+    because a score you cannot interrogate is just an opinion with a number on it.
+  </p>
+  <div id="slip"></div>
 </div>
 
 <footer>

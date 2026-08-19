@@ -132,6 +132,41 @@ It works team-first rather than date-first because SofaScore removed their date-
 
 The report lands in `reports/` and opens automatically. Inside it you can switch between last 5, last 10 and all, and between all matches, home only and away only. Hover any point on a chart for the date, opponent and value.
 
+## Track record (`track.py`)
+
+The tool has no evidence yet that it beats the market, and neither does anything else after a few weeks. The only way to find out is to write picks down before kickoff at the price you could actually have got, settle them from the result, and count.
+
+```bash
+python track.py add --event 14083629 --team 2814 --stat "Total shots" \
+                    --line 12.5 --side over --price 1.95 \
+                    --rate 0.7 --need 1.68 --proj 13.1
+python track.py settle
+python track.py report
+```
+
+Three things are enforced rather than suggested, because a record that can be quietly tidied is worth nothing:
+
+- a pick cannot be logged once the match has kicked off
+- settlement reads the result from the API, so a loser cannot be dropped
+- the model's numbers at the time are stored, so you can later ask whether its signal predicted anything
+
+The report gives ROI with a 95% interval, and splits results by whether the price cleared the Need figure. If those two halves perform the same, the model is not adding anything and you have learned something valuable for the price of some record-keeping.
+
+**Expect the interval to span zero for a long time.** Simulating a genuine 10% edge over 400 bets gave +6.3% ROI with an interval of -3.3% to +15.8%, still consistent with no edge at all. It needed about 900 settled bets to separate from luck. That is not a flaw in the tracker, it is what betting variance actually looks like, and it is the single most important number to know before selling anything.
+
+## My slip
+
+A fourth tab. Press Add on any Standout row and it lands here, scored out of 100:
+
+- **Value, 45 points.** How far your price beats what the evidence supports. Carries the most weight because the record tells you what happened and only the price tells you whether the bet is worth making. A 10/10 record at 1.10 is a bad bet.
+- **Evidence, 25 points.** How much data sits behind it.
+- **Model, 15 points.** Whether the opponent-adjusted projection agrees with the record.
+- **Context, 15 points.** Whether the record was built against the right standard of opposition.
+
+The breakdown is always shown. A score you cannot interrogate is just an opinion with a number stuck on it.
+
+Add more than one and it shows the combined price against the fair price, and how much better each leg would need to be priced to break even. It also states plainly what multiples do: the bookmaker's margin compounds, so at 5% per market a treble carries about 16% against you and a five-fold about 28%. Singles are where value survives.
+
 ## Weekly routine
 
 ```bash
@@ -160,6 +195,7 @@ Commit source changes to `main` as normal. Only generated output goes to `gh-pag
 | `hitrates.py` | Parses match statistics, builds each team's form, works out the lines. |
 | `report.py` | Generates the HTML. |
 | `publish.sh` | Pushes the built site to gh-pages without growing the repo. |
+| `track.py` | Logs picks before kickoff, settles them, reports honestly. |
 | `make_index.py` | Builds the front page listing every report. |
 | `check.py` | Probes endpoints when something breaks. |
 | `explore.ipynb` | Your notebook. Keep it for experimenting. |

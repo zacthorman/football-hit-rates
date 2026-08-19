@@ -22,6 +22,7 @@ import sofascore_api as api
 # Shown first, in this order, when present. Anything else the endpoint
 # returns is still collected and appears after these.
 PREFERRED_STATS = [
+    "Goals",
     "Total shots",
     "Shots on target",
     "Corner kicks",
@@ -49,6 +50,7 @@ BETTABLE_STATS = {
     # it cannot be bet, and every extra row is another combination for the
     # Standout scan to trawl and another chance for a fluke to look like a
     # finding. Use --all-stats to see everything again.
+    "Goals",              # Team Total Goals, Over/Under, Both Teams to Score
     "Total shots",        # Total Shots
     "Shots on target",    # Total Shots on Target
     "Corner kicks",       # Corners
@@ -303,6 +305,14 @@ def team_form(
                 },
             }
         )
+
+        # Goals are not in the statistics feed at all: they live on the
+        # scoreline. Bolted on here so "Goals" behaves like every other stat,
+        # which is what makes over 1.5 team goals, and the whole for-versus-
+        # against matchup, work without a special case everywhere downstream.
+        # Full match only, because the half-time score is a separate call.
+        records[-1]["stats"].setdefault("ALL", {})["Goals"] = float(goals_for)
+        records[-1]["against"].setdefault("ALL", {})["Goals"] = float(goals_against)
 
         if verbose:
             periods = "/".join(sorted(match_stats, key=list(PERIODS).index))
@@ -725,8 +735,14 @@ def build_tier_map(
     for table in tables:
         if not table:
             continue
-        for row in table:
-            rank = offset + row["position"]
+        for order, row in enumerate(table, start=1):
+            # Position is normally present, but SofaScore leaves it null on
+            # some competitions. The row order is never missing, so it is the
+            # fallback. Without this a null position crashes the whole build
+            # after twenty minutes of fetching, which is the worst possible
+            # moment to find out.
+            position = row.get("position") or order
+            rank = offset + position
             if rank <= top:
                 tier = "top"
             elif rank <= upper:

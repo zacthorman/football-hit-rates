@@ -352,6 +352,52 @@ select, .num-input {
 .proj.est b { font-weight: 600; }
 .chance { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 
+/* ---------------------------------------------------------- best bets */
+.comp-head {
+  margin: 20px 0 10px; font-size: 13px; font-weight: 640;
+  letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary);
+}
+.comp-head .pos { text-transform: none; letter-spacing: 0; }
+
+.pick {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;
+}
+.pick-line { font-size: 17px; font-weight: 640; letter-spacing: -0.01em; }
+.pick-fixture { color: var(--muted); font-size: 13px; margin-top: 1px; }
+
+.pick-halves {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 10px;
+}
+@media (max-width: 620px) { .pick-halves { grid-template-columns: 1fr; } }
+
+.half {
+  background: var(--tint); border-radius: 9px; padding: 9px 11px;
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: baseline;
+}
+.half-label { font-size: 12.5px; color: var(--text-secondary); }
+.half-num {
+  font-variant-numeric: tabular-nums; font-weight: 660; font-size: 15px;
+  justify-self: end;
+}
+.half .bar { grid-column: 1 / -1; margin: 3px 0 1px; }
+.half .seq {
+  grid-column: 1 / -1; font-size: 11.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-foot {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+  font-size: 13px; color: var(--text-secondary);
+  border-top: 1px solid var(--grid); padding-top: 10px;
+}
+.pick-foot b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.pick-foot .add-btn { margin-left: auto; }
+.agree { font-size: 12.5px; }
+.agree.yes { color: var(--hit); }
+.agree.no  { color: var(--miss); }
+
 .tooltip {
   position: fixed; pointer-events: none;
   background: var(--text-primary); color: var(--surface-1);
@@ -428,7 +474,7 @@ const STRONG_LOW = 20;
    through, which is now only the bettable set unless the report was built
    with --all-stats. */
 const CORE_STATS = [
-  "Total shots", "Shots on target", "Corner kicks",
+  "Goals", "Total shots", "Shots on target", "Corner kicks",
   "Fouls", "Tackles", "Offsides", "Throw-ins", "Yellow cards",
 ];
 
@@ -1000,6 +1046,307 @@ function scanLines(minSample) {
   return { found, combos, skipped };
 }
 
+/* ------------------------------------------------------------- best bets
+
+   The matchup scan. A hit rate on its own only tells you what one team did
+   against whoever happened to be in front of them. The question worth asking
+   is whether both halves of the fixture point the same way: Arsenal have gone
+   over 5.5 corners in nine of their last ten at home, AND Coventry have
+   conceded over 5.5 in eight of their last ten away. Two independent records
+   agreeing is worth far more than one record twice as long, because they can
+   fail independently.
+
+   Venue is enforced on both sides. The home team's home record is matched
+   against the away team's away record, never the pooled one, because that is
+   the actual fixture.
+
+   The two records are then pooled into one Wilson interval. That is the
+   honest way to combine them: twenty observations at 85% supports a much
+   shorter price than ten at 85%, and the interval says so by itself. It also
+   refuses to let one side carry the other, because both halves must clear the
+   bar individually before the pair is scored at all. */
+
+const MATCHUP_FLOOR = 0.65;   // each side must clear this on its own
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* A tail probability of 0.03% printed as "0.0%" reads as impossible, which is
+   the one impression this number must never give. */
+function fmtChance(p) {
+  const pct = p * 100;
+  if (pct < 0.05) return "under 0.05%";
+  return `${pct.toFixed(pct < 1 ? 2 : 1)}%`;
+}
+
+function scanMatchups(minSample) {
+  const found = [];
+  let combos = 0;
+  let skipped = 0;
+
+  ALL.fixtures.forEach((fx, fxIndex) => {
+    const now = Date.now() / 1000;
+    if (!showPast && (fx.fixture.kickoff || 0) <= now) return;
+
+    Object.keys(fx.lines || {}).forEach(per => {
+      const lines = fx.lines[per] || {};
+
+      (fx.stats[per] || []).forEach(name => {
+        const suggested = lines[name];
+        if (suggested === undefined) return;
+
+        // Both directions: the home side's attack against the away side's
+        // defence, then the reverse.
+        [0, 1].forEach(side => {
+          const attackVenue  = side === 0 ? "home" : "away";
+          const defendVenue  = side === 0 ? "away" : "home";
+
+          const attackRows = fx.records[side]
+            .filter(r => r.venue === attackVenue).slice(-games);
+          const defendRows = fx.records[1 - side]
+            .filter(r => r.venue === defendVenue).slice(-games);
+
+          // Same guard as the standout scan: a promoted club's record is
+          // true and useless, and this is the exact fixture where pairing it
+          // with a Premier League defence produces a beautiful wrong answer.
+          if (!includeMismatched) {
+            const bad = [fx.records[side], fx.records[1 - side]].some(recs => {
+              const sample = recs.slice(-games);
+              const ok = sample.filter(
+                r => (r.competition || "?") === fx.fixture.competition).length;
+              return sample.length && ok / sample.length < 0.6;
+            });
+            if (bad) { skipped++; return; }
+          }
+
+          const forVals = attackRows
+            .map(r => (r.stats[per] || {})[name])
+            .filter(v => v !== undefined && v !== null);
+          const againstVals = defendRows
+            .map(r => (r.against[per] || {})[name])
+            .filter(v => v !== undefined && v !== null);
+
+          if (forVals.length < minSample || againstVals.length < minSample) return;
+
+          // A short ladder around the suggested line, which is the median and
+          // so stands in for where a bookmaker would hang it.
+          //
+          // The ladder is deliberately one-sided per direction. An over bet
+          // BELOW the median, or an under bet ABOVE it, is a bet on the easy
+          // side of the market: it will hit almost every week and be priced
+          // at 1.05, and it swamped this list when both sides were allowed.
+          // "Newcastle over 0.5 yellow cards, 20 from 20" is true, useless,
+          // and exactly what a scan like this produces if you let it. So an
+          // over only looks at the median and above, an under at the median
+          // and below. It also halves the combinations trawled, which makes
+          // everything that survives a little more meaningful.
+          [-1, 0, 1].forEach(step => {
+            const line = suggested + step;
+            if (line < 0.5) return;
+            combos++;
+
+            const forOver     = forVals.filter(v => v > line).length;
+            const againstOver = againstVals.filter(v => v > line).length;
+
+            [true, false].forEach(over => {
+              if (over && step < 0) return;
+              if (!over && step > 0) return;
+              const kFor = over ? forOver : forVals.length - forOver;
+              const kAgn = over ? againstOver : againstVals.length - againstOver;
+
+              const pFor = kFor / forVals.length;
+              const pAgn = kAgn / againstVals.length;
+              if (pFor < MATCHUP_FLOOR || pAgn < MATCHUP_FLOOR) return;
+
+              const k = kFor + kAgn;
+              const n = forVals.length + againstVals.length;
+              const score = wilsonLow(k, n);
+
+              found.push({
+                score, k, n, over, line,
+                stat: name, period: per,
+                fixture: `${fx.fixture.home} v ${fx.fixture.away}`,
+                fixtureIndex: fxIndex,
+                competition: fx.fixture.competition,
+                kickoff: fx.fixture.kickoff || 0,
+                team: fx.teams[side].name,
+                teamIndex: side,
+                opponent: fx.teams[1 - side].name,
+                attackVenue, defendVenue,
+                kFor, nFor: forVals.length, pFor,
+                kAgn, nAgn: againstVals.length, pAgn,
+                forVals, againstVals,
+                chance: binomTail(n, k),
+                // Does the opponent-adjusted projection agree? Not required,
+                // but a disagreement is worth seeing before you stake.
+                proj: ((fx.projection || {})[per] || {})[name],
+                est: !(fx.projection || {})[per]
+                     && fx.tierProjection ? (fx.tierProjection.stats || {})[name] : undefined,
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+
+  // One row per team and stat: keep only that pairing's best line and
+  // direction, otherwise the top three are the same bet at three prices.
+  //
+  // The tiebreak matters more than it looks. The score depends only on how
+  // many of n went the right way, so "over 0.5 goals" and "over 2.5 goals"
+  // both score identically at 10/10, and without a tiebreak the list fills
+  // up with lines nobody would price. Among equal records, take the most
+  // demanding line: the highest for an over, the lowest for an under.
+  const demand = r => (r.over ? r.line : -r.line);
+
+  const best = new Map();
+  found.forEach(r => {
+    const key = [r.fixtureIndex, r.teamIndex, r.stat, r.period].join("|");
+    const held = best.get(key);
+    if (!held
+        || r.score > held.score
+        || (r.score === held.score && demand(r) > demand(held))) {
+      best.set(key, r);
+    }
+  });
+
+  // Across stats, a tie on score is broken by how close the line sits to what
+  // the teams actually average. A line the record clears by a mile is a line
+  // the bookmaker will price at odds not worth taking.
+  const tightness = r => {
+    const all = r.forVals.concat(r.againstVals);
+    const mean = all.reduce((s, v) => s + v, 0) / all.length;
+    return -Math.abs(mean - r.line);
+  };
+
+  const list = [...best.values()].sort(
+    (a, b) => (b.score - a.score) || (tightness(b) - tightness(a)));
+  return { found: list, combos, skipped };
+}
+
+function bestBetsView() {
+  const minSample = parseInt(document.getElementById("bmin").value, 10) || 4;
+  const limit = parseInt(document.getElementById("btop").value, 10) || 3;
+  const { found, combos, skipped } = scanMatchups(minSample);
+
+  const periodName = p => (ALL.periods && ALL.periods[p]) || p;
+  const target = document.getElementById("bestbets");
+
+  if (!found.length) {
+    target.innerHTML = `<p class="empty">No matchup had both halves at
+      ${Math.round(MATCHUP_FLOOR * 100)}% or better on at least ${minSample}
+      matches each. Lower the minimum, or build with more games.</p>`;
+    window.__best = [];
+    return;
+  }
+
+  // Grouped by competition, because "top three this gameweek" means three
+  // per division, not three across a file that happens to hold six leagues.
+  const byComp = new Map();
+  found.forEach(r => {
+    if (!byComp.has(r.competition)) byComp.set(r.competition, []);
+    byComp.get(r.competition).push(r);
+  });
+
+  const shown = [];
+  const blocks = [...byComp.entries()].map(([comp, rows]) => {
+    const picks = rows.slice(0, limit);
+    const cards = picks.map(r => {
+      const i = shown.push(r) - 1;
+      const p = r.k / r.n;
+      const fair = fairOdds(p);
+      const need = fairOdds(r.score);
+      const dir = r.over ? "over" : "under";
+
+      // The projection, when there is one, is the only thing here that did
+      // not come from the same matches as the record.
+      let agree = "";
+      const projValues = r.proj || r.est;
+      if (projValues) {
+        const expected = projValues[r.teamIndex];
+        if (expected !== undefined) {
+          const agrees = r.over ? expected > r.line : expected < r.line;
+          agree = `<div class="agree ${agrees ? "yes" : "no"}">
+            ${r.proj ? "Projected" : "Estimated"} ${expected}
+            ${agrees ? "agrees" : "disagrees"}</div>`;
+        }
+      }
+
+      return `<div class="pick" data-best="${i}">
+        <div class="pick-head">
+          <div class="pick-line">${escapeHtml(r.team)} ${dir} ${r.line}
+            ${escapeHtml(r.stat.toLowerCase())}
+            <span class="pos">${periodName(r.period)}</span></div>
+          <div class="pick-fixture">${escapeHtml(r.fixture)}</div>
+        </div>
+
+        <div class="pick-halves">
+          <div class="half">
+            <span class="half-label">${escapeHtml(r.team)} ${r.attackVenue}</span>
+            <span class="half-num">${r.kFor}/${r.nFor}</span>
+            <div class="bar"><div class="fill" style="width:${r.pFor * 100}%;
+                 background:var(${VARS[r.teamIndex]})"></div></div>
+            <span class="seq">${r.forVals.join(", ")}</span>
+          </div>
+          <div class="half">
+            <span class="half-label">${escapeHtml(r.opponent)} conceded, ${r.defendVenue}</span>
+            <span class="half-num">${r.kAgn}/${r.nAgn}</span>
+            <div class="bar"><div class="fill" style="width:${r.pAgn * 100}%;
+                 background:var(${VARS[1 - r.teamIndex]})"></div></div>
+            <span class="seq">${r.againstVals.join(", ")}</span>
+          </div>
+        </div>
+
+        <div class="pick-foot">
+          <span><b>${r.k}/${r.n}</b> combined</span>
+          <span>fair <b>${fmtOdds(fair)}</b></span>
+          <span>need <b>${fmtOdds(need)}</b></span>
+          <span class="chance">${fmtChance(r.chance)} by chance</span>
+          ${agree}
+          <button type="button" class="add-btn" data-badd="${i}"
+            data-in="${SLIP.some(s => s.key === rowKey(r)) ? 1 : 0}">
+            ${SLIP.some(s => s.key === rowKey(r)) ? "Added" : "Add"}</button>
+        </div>
+      </div>`;
+    }).join("");
+
+    return `<div class="comp-head">${escapeHtml(comp)}
+      <span class="pos">${rows.length} qualified</span></div>${cards}`;
+  }).join("");
+
+  window.__best = shown;
+
+  const weakest = shown[shown.length - 1];
+  const expected = combos * binomTail(weakest.n, weakest.k);
+
+  target.innerHTML = `
+    <div class="caution">
+      <strong>What this is.</strong> Both halves of the fixture pointing the
+      same way: the team's own record at this venue, and what their opponent
+      concedes at theirs. Two records agreeing is stronger evidence than one
+      record twice as long, because they can fail independently. Both halves
+      must clear ${Math.round(MATCHUP_FLOOR * 100)}% on their own before a
+      pairing is scored at all, so a 10/10 cannot drag a 3/10 into the list.
+      <br><br>
+      <strong>What it is not.</strong> This scan looked at
+      <strong>${combos}</strong> combinations, and
+      ${expected < 1
+        ? `fewer than <strong>one</strong> of them would`
+        : `roughly <strong>${expected.toFixed(0)}</strong> of them would`}
+      look this good with nothing behind them at all. Both records also come from the same matches
+      the lines were derived from, which flatters them. <strong>Need</strong> is
+      the price the evidence supports once the sample size is accounted for, and
+      it is the only number here worth betting off. Nothing on this page knows
+      what the bookmaker is offering, and the price is the entire bet.
+      ${skipped ? `<br><br><strong>${skipped}</strong> pairings were left out
+        because one side's record was built in a different competition.` : ""}
+    </div>
+    ${blocks}`;
+}
+
 function rowKey(r) {
   return [r.fixtureIndex, r.teamIndex, r.stat, r.period, r.line, r.over].join("|");
 }
@@ -1382,6 +1729,7 @@ function applyFixture() {
   render();
   if (tab === "players") playerView();
   if (tab === "standout") standoutView();
+  if (tab === "best") bestBetsView();
 }
 
 function switchTab(target) {
@@ -1392,6 +1740,7 @@ function switchTab(target) {
     p.hidden = p.dataset.panel !== target);
   if (target === "players") playerView();
   if (target === "standout") standoutView();
+  if (target === "best") bestBetsView();
   if (target === "slip") slipView();
 }
 
@@ -1466,6 +1815,7 @@ segment("games", v => {
   render();
   if (tab === "players") playerView();
   if (tab === "standout") standoutView();
+  if (tab === "best") bestBetsView();
 });
 segment("tier", v => { tier = v; render(); if (tab === "players") playerView(); });
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
@@ -1505,6 +1855,20 @@ document.getElementById("theme").addEventListener("click", () => {
 /* The report is a static snapshot, but the browser knows the time, so it can
    drop fixtures that have already kicked off. That keeps a weekend card
    useful all weekend instead of going stale one match at a time. */
+/* "Sat 23 Aug, 15:00" in the reader's own timezone. The payload stores a
+   unix timestamp precisely so this can be local rather than UTC: a 20:00 UTC
+   kick-off is a 21:00 one in most of Europe, and getting that wrong by an
+   hour is the sort of thing that loses a bet. */
+function shortWhen(kickoff) {
+  if (!kickoff) return "";
+  const d = new Date(kickoff * 1000);
+  const day = d.toLocaleDateString(undefined,
+    { weekday: "short", day: "numeric", month: "short" });
+  const time = d.toLocaleTimeString(undefined,
+    { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${day}, ${time}`;
+}
+
 const fixtureSelect = document.getElementById("fixture");
 const pastToggle = document.getElementById("show-past");
 
@@ -1523,10 +1887,17 @@ function fillFixtures() {
   if (allPlayed) indexes = ALL.fixtures.map((f, i) => i);
 
   const now = Date.now() / 1000;
+
+  // Soonest first. A weekend card is read in kick-off order, not in whatever
+  // order the clubs came back from the league table.
+  indexes.sort((a, b) =>
+    (ALL.fixtures[a].fixture.kickoff || 0) - (ALL.fixtures[b].fixture.kickoff || 0));
+
   fixtureSelect.innerHTML = indexes.map(i => {
     const f = ALL.fixtures[i].fixture;
     const played = (f.kickoff || 0) <= now;
-    return `<option value="${i}">${f.home} v ${f.away}${played ? " (played)" : ""}</option>`;
+    return `<option value="${i}">${shortWhen(f.kickoff)}  ${f.home} v ${f.away}`
+         + `${played ? " (played)" : ""}</option>`;
   }).join("");
 
   const hidden = ALL.fixtures.length - indexes.length;
@@ -1548,6 +1919,24 @@ function fillFixtures() {
 
   document.getElementById("fixture-group").hidden = indexes.length < 2;
 }
+
+/* The index links straight to a fixture with #e<event id>. Matching on the
+   event id rather than a position means the link survives a rebuild that
+   reorders or drops fixtures, which happens every week. */
+function applyDeepLink() {
+  const match = /^#e(\d+)$/.exec(location.hash || "");
+  if (!match) return;
+  const wanted = parseInt(match[1], 10);
+  const found = ALL.fixtures.findIndex(f => f.fixture.id === wanted);
+  if (found >= 0) {
+    DATA = ALL.fixtures[found];
+    if ((DATA.fixture.kickoff || 0) <= Date.now() / 1000) showPast = true;
+    applyFixture();
+  }
+}
+
+applyDeepLink();
+window.addEventListener("hashchange", () => { applyDeepLink(); fillFixtures(); });
 
 if (ALL.fixtures.length > 1) {
   fixtureSelect.addEventListener("change", () => {
@@ -1589,6 +1978,32 @@ document.getElementById("include-mismatched").addEventListener("click", e => {
   includeMismatched = !includeMismatched;
   e.currentTarget.setAttribute("aria-pressed", includeMismatched);
   standoutView();
+  bestBetsView();
+});
+
+// The best-bets controls and its own Add button. Picks added here have no
+// price box beside them, because a matchup card is a shortlist entry rather
+// than a priced bet: you type the price in on the slip.
+["bmin", "btop"].forEach(id =>
+  document.getElementById(id).addEventListener("input", () => {
+    clearTimeout(standoutTimer);
+    standoutTimer = setTimeout(bestBetsView, 140);
+  }));
+
+document.getElementById("bestbets").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-badd]");
+  if (!btn) return;
+  const r = (window.__best || [])[parseInt(btn.dataset.badd, 10)];
+  if (!r) return;
+
+  const key = rowKey(r);
+  const at = SLIP.findIndex(s => s.key === key);
+  if (at >= 0) SLIP.splice(at, 1);
+  else SLIP.push({ key, row: r, price: 0 });
+
+  bestBetsView();
+  slipView();
+  document.getElementById("slip-count").textContent = SLIP.length ? ` (${SLIP.length})` : "";
 });
 
 document.getElementById("standout").addEventListener("click", e => {
@@ -1808,6 +2223,7 @@ def build_html(payload: dict) -> str:
 <div class="tabs" role="tablist">
   <button type="button" data-tab="team" aria-selected="true">Team stats</button>
   <button type="button" data-tab="players" aria-selected="false">Players</button>
+  <button type="button" data-tab="best" aria-selected="false">Best bets</button>
   <button type="button" data-tab="standout" aria-selected="false">Standout lines</button>
   <button type="button" data-tab="slip" aria-selected="false">My slip<span id="slip-count"></span></button>
 </div>
@@ -1839,6 +2255,22 @@ def build_html(payload: dict) -> str:
     Players who have left the club are excluded.
   </p>
   <div id="players"></div>
+</div>
+
+<div class="panel" data-panel="best" hidden>
+  <div class="controls">
+    <div class="control-group">
+      <span class="control-label">Min matches each side</span>
+      <input class="num-input" id="bmin" type="number" step="1" min="3" value="4"
+             aria-label="Minimum matches on each side">
+    </div>
+    <div class="control-group">
+      <span class="control-label">Per competition</span>
+      <input class="num-input" id="btop" type="number" step="1" min="1" max="10" value="3"
+             aria-label="How many per competition">
+    </div>
+  </div>
+  <div id="bestbets"></div>
 </div>
 
 <div class="panel" data-panel="standout" hidden>

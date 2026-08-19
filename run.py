@@ -436,6 +436,7 @@ def demo() -> Path:
     """Synthetic data, so the report can be checked without network access."""
     rng = random.Random(7)
     team_stats = [
+        ("Goals", 2, 1),
         ("Total shots", 12, 4),
         ("Shots on target", 4, 2),
         ("Corner kicks", 5, 2),
@@ -522,9 +523,15 @@ def demo() -> Path:
                            "Ciss", "De Frutos", "Camello", "Palazon", "Perez"],
     }
 
-    def one(home: str, away: str) -> dict:
-        # Second side is a "promoted" team, so the mismatch guard is visible.
-        matches = [make_matches(1.15), make_matches(0.9, "Segunda (demo data)")]
+    def one(home: str, away: str, promoted: bool = False) -> dict:
+        # One fixture has a "promoted" away side so the mismatch guard and the
+        # tier fallback are both visible; the other has two same-division
+        # sides so the matchup scan has something legitimate to find.
+        matches = [
+            make_matches(1.15),
+            make_matches(0.9, "Segunda (demo data)" if promoted
+                         else "LaLiga (demo data)"),
+        ]
         names = hitrates.stat_names(*matches)
         meetings = [make_matches(1.05)[:6], make_matches(0.95)[:6]]
         h2h_names = hitrates.stat_names(*meetings)
@@ -566,7 +573,8 @@ def demo() -> Path:
         for i in range(10)
     }
 
-    fixtures = [one("Espanyol", "Levante UD"), one("Getafe", "Rayo Vallecano")]
+    fixtures = [one("Espanyol", "Levante UD"),
+                one("Getafe", "Rayo Vallecano", promoted=True)]
 
     for entry in fixtures:
         entry["tiers"] = {

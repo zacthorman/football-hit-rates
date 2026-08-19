@@ -132,6 +132,66 @@ It works team-first rather than date-first because SofaScore removed their date-
 
 The report lands in `reports/` and opens automatically. Inside it you can switch between last 5, last 10 and all, and between all matches, home only and away only. Hover any point on a chart for the date, opponent and value.
 
+## Best bets
+
+A tab that scans the whole round for fixtures where **both halves point the
+same way**: the team's own record at this venue, and what their opponent
+concedes at theirs. Forest have gone over 1.5 first-half corners in 10 of
+their last 10 at home, and Leeds have conceded over 1.5 in 9 of their last 10
+away. Two separate records agreeing is stronger than one record twice as long,
+because they can fail independently.
+
+Rules the scan follows, and why:
+
+- **Venue is enforced on both sides.** Home record against away record, never
+  the pooled one. That is the actual fixture.
+- **Both halves must clear 65% on their own** before the pairing is scored, so
+  a 10/10 cannot drag a 3/10 into the list.
+- **The two records are pooled into one interval.** 20 observations at 85%
+  supports a much shorter price than 10 at 85%, and the interval says so.
+- **The line ladder is one-sided.** An over is only tried at the median line
+  and above, an under at the median and below. Without this the list fills up
+  with things like "Newcastle over 0.5 yellow cards, 20 from 20", which is
+  true, useless, and priced at about 1.05.
+- **Ties break towards the harder line.** The score depends only on how many
+  went the right way, so over 0.5 and over 2.5 both score identically at
+  10/10. The more demanding line wins.
+- **Grouped by competition**, three per division by default.
+
+Every card shows both sequences in full, the pooled record, the fair price,
+the price the evidence actually supports, how often a scan this size throws up
+something this good by chance, and whether the opponent-adjusted projection
+agrees. The projection is the only figure on the card that did not come from
+the same matches as the record.
+
+None of this knows what the bookmaker is offering, and the price is the entire
+bet. Treat it as a shortlist to price up.
+
+## Goals
+
+Goals are not in SofaScore's statistics feed at all, they live on the
+scoreline, so they are bolted into the stat blocks from there. That makes
+`Goals` behave like every other stat: it has a line, a hit rate, a for and
+against split, and it feeds the matchup scan. Full match only, because the
+half-time score is a separate call.
+
+## The front page
+
+`make_index.py` lists **fixtures**, not report files. A league round is one
+file holding ten matches, and `premier-league-10-fixtures.html` tells you
+nothing about whether Arsenal are playing tonight. So every report's payload
+is read, each fixture pulled out with its kick-off time, and the lot sorted by
+when they actually start and grouped under Today, Tomorrow and then by day.
+Competition chips filter, and there is a search box for a club name.
+
+Each fixture links straight to itself inside its report using the event id in
+the URL hash, so `reports/premier-league.html#e16363633` opens on that match
+rather than on whichever one happened to be first.
+
+Kick-off times render in the reader's own timezone. The page ships unix
+timestamps and lets the device do it, because a 20:00 UTC kick-off is 21:00 in
+most of Europe and being an hour out is the sort of thing that loses a bet.
+
 ## Standard of opposition (`--tiers`)
 
 The opponent-adjusted projection needs a rating for both sides, and a

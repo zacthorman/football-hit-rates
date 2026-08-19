@@ -162,6 +162,67 @@ def current_season_id(tournament_id: int) -> int | None:
     return seasons[0]["id"] if seasons else None
 
 
+def season_ids(tournament_id: int, count: int = 4) -> list[int]:
+    """Recent season ids, newest first.
+
+    Needed because a club's standard is judged on where it finished LAST
+    season, not on this one, which in August is three games old and tells
+    you nothing.
+    """
+    data = get_json(f"unique-tournament/{tournament_id}/seasons", max_age_hours=168)
+    seasons = (data or {}).get("seasons", [])
+    return [s["id"] for s in seasons[:count] if isinstance(s.get("id"), int)]
+
+
+def previous_season_id(tournament_id: int) -> int | None:
+    """Last completed season. The current one is index 0, so this is index 1."""
+    ids = season_ids(tournament_id, count=2)
+    return ids[1] if len(ids) > 1 else None
+
+
+def tournament_table(
+    tournament_id: int, season_id: int | None = None
+) -> list[dict]:
+    """The final league table: one row per club, in finishing order.
+
+    Returns [{"id", "name", "position", "points", "played"}]. Position is
+    taken from the table's own ordering rather than a field, because the
+    field is missing on some competitions and the row order never is.
+    """
+    if season_id is None:
+        season_id = current_season_id(tournament_id)
+    if season_id is None:
+        return []
+
+    data = get_json(
+        f"unique-tournament/{tournament_id}/season/{season_id}/standings/total",
+        max_age_hours=168,
+    )
+
+    table: list[dict] = []
+    for standing in (data or {}).get("standings", []):
+        # A competition with groups returns several standings blocks. Only
+        # the overall league table is wanted, and that is the one whose type
+        # is "total" with no group name.
+        for i, row in enumerate(standing.get("rows", []), start=1):
+            team = row.get("team", {})
+            if not isinstance(team.get("id"), int):
+                continue
+            table.append(
+                {
+                    "id": team["id"],
+                    "name": team.get("name", "?"),
+                    "position": row.get("position") or i,
+                    "points": row.get("points"),
+                    "played": row.get("matches"),
+                }
+            )
+        if table:
+            break
+
+    return table
+
+
 def tournament_team_ids(tournament_id: int, season_id: int | None = None) -> list[int]:
     """Every team in a competition, read off the league table.
 

@@ -132,6 +132,51 @@ It works team-first rather than date-first because SofaScore removed their date-
 
 The report lands in `reports/` and opens automatically. Inside it you can switch between last 5, last 10 and all, and between all matches, home only and away only. Hover any point on a chart for the date, opponent and value.
 
+## Standard of opposition (`--tiers`)
+
+The opponent-adjusted projection needs a rating for both sides, and a
+promoted club has none: every match on its record was played in a division
+nobody else in the fit belongs to. Coventry came up with exactly one usable
+match, away at Hull, who were also promoted, so the two of them were fitted
+in a closed loop off a single Championship game. That is how Coventry ended
+up projected for more corners at the Emirates than Arsenal.
+
+`--tiers` reads last season's final tables for the division and the one
+below, stacks them, and sorts every club into four bands:
+
+| Band   | Where they finished                       |
+|--------|-------------------------------------------|
+| Top 6  | 1st to 6th                                |
+| Upper  | 7th to 11th                               |
+| Lower  | 12th to 17th                              |
+| Bottom | 18th and below, plus every promoted club  |
+
+Two things then become possible.
+
+**The Opposition control** filters any team's record to matches against one
+band. Arsenal's corner record against bottom-tier sides is a different and
+far more relevant number from their record against everyone.
+
+**The estimate.** When one side cannot be rated, the projection is taken
+from the other side's record against bottom-tier opposition instead. Arsenal
+at home to bottom-tier clubs gives both figures at once: what Arsenal
+manage becomes Arsenal's number, and what those clubs manage at the Emirates
+becomes Coventry's. No Coventry data is used at all, which is the point,
+because their data is the part that does not carry across divisions.
+
+Estimates are shown as `est` rather than `proj`, underlined with a dotted
+rule, and hovering one lists the exact matches it came from. If there are
+fewer than three usable matches even then, nothing is shown.
+
+It wants a full season rather than ten games, otherwise there are barely any
+bottom-tier matches to average:
+
+    python run.py --league "Premier League" --games 38 --adjust --tiers --players
+
+Last season's table is used, not this one. In August the current table is
+three games old and would put whoever won on the opening weekend in the top
+six.
+
 ## Track record (`track.py`)
 
 The tool has no evidence yet that it beats the market, and neither does anything else after a few weeks. The only way to find out is to write picks down before kickoff at the price you could actually have got, settle them from the result, and count.

@@ -685,6 +685,163 @@ def hit_rate(
 
 # ---------------------------------------------------------------- adjustment
 
+# ------------------------------------------------------- standard of opposition
+#
+# The opponent-adjusted model needs a rating for both sides, and a promoted
+# club has none, because everyone it played is in another division. This is
+# the way round that: instead of asking "how good are Coventry", ask "what do
+# Arsenal do to sides of that standard", and answer it from Arsenal's own
+# record, which is well sampled.
+#
+# Standard is read off last season's final table. This season's is three
+# games old in August and says nothing. Clubs from a lower division sit below
+# every club from the higher one, which is crude but is the honest default:
+# promoted sides are, on average, about as good as the teams that finished
+# just above the drop.
+
+TIERS = [
+    ("top", "top six"),
+    ("upper", "upper mid-table"),
+    ("lower", "lower mid-table"),
+    ("bottom", "bottom of the table and promoted sides"),
+]
+TIER_LABELS = dict(TIERS)
+
+
+def build_tier_map(
+    tables: list[list[dict]], top: int = 6, upper: int = 11, lower: int = 17
+) -> dict[int, str]:
+    """Club id to tier, from one or more final league tables.
+
+    Pass the higher division first. Clubs from later tables are stacked
+    underneath it, so a Championship side always ranks below a Premier League
+    one. The cut-offs are positions in that stacked ranking, so with the
+    defaults the top six are "top", 7 to 11 "upper", 12 to 17 "lower", and
+    everything from 18 down, including every promoted club, is "bottom".
+    """
+    tier_map: dict[int, str] = {}
+    offset = 0
+
+    for table in tables:
+        if not table:
+            continue
+        for row in table:
+            rank = offset + row["position"]
+            if rank <= top:
+                tier = "top"
+            elif rank <= upper:
+                tier = "upper"
+            elif rank <= lower:
+                tier = "lower"
+            else:
+                tier = "bottom"
+            # First table wins: a club relegated last season is judged on the
+            # division it actually played in, not on where it now sits.
+            tier_map.setdefault(row["id"], tier)
+        offset += len(table)
+
+    return tier_map
+
+
+def tier_of(tier_map: dict[int, str], team_id: int | None) -> str:
+    """A club with no table entry is treated as promoted, so: bottom.
+
+    Defaulting to "bottom" rather than "unknown" is deliberate. Anyone
+    missing from both tables came up from below, and pretending otherwise
+    would put them in mid-table by accident.
+    """
+    return tier_map.get(team_id, "bottom") if team_id is not None else "bottom"
+
+
+def tier_split(
+    records: list[dict],
+    tier_map: dict[int, str],
+    tier: str,
+    period: str = "ALL",
+    venue: str | None = None,
+) -> dict:
+    """What a team did, and had done to it, against one standard of opponent.
+
+    Returns {"for": {stat: mean}, "against": {stat: mean}, "matches": n,
+    "opponents": [names]}. Everything is a plain average over the matches
+    that qualify, with no modelling on top, because the whole point of this
+    route is that it is directly checkable against the match list shown
+    beside it.
+    """
+    rows = [
+        r for r in records
+        if tier_of(tier_map, r.get("opponent_id")) == tier
+        and (venue is None or r.get("venue") == venue)
+    ]
+
+    totals_for: dict[str, list[float]] = {}
+    totals_against: dict[str, list[float]] = {}
+
+    for r in rows:
+        for stat, value in (r.get("stats", {}).get(period) or {}).items():
+            totals_for.setdefault(stat, []).append(value)
+        for stat, value in (r.get("against", {}).get(period) or {}).items():
+            totals_against.setdefault(stat, []).append(value)
+
+    return {
+        "for": {k: round(sum(v) / len(v), 2) for k, v in totals_for.items() if v},
+        "against": {k: round(sum(v) / len(v), 2) for k, v in totals_against.items() if v},
+        "matches": len(rows),
+        "opponents": [r.get("opponent", "?") for r in rows],
+    }
+
+
+def tier_projection(
+    rated_records: list[dict],
+    tier_map: dict[int, str],
+    opponent_id: int,
+    rated_is_home: bool,
+    period: str = "ALL",
+    min_matches: int = 5,
+) -> dict | None:
+    """Project a fixture from the rated side's record against that standard.
+
+    Used when one club cannot be rated at all. Arsenal against bottom-tier
+    sides gives both numbers at once: what Arsenal manage becomes Arsenal's
+    projection, and what those sides manage against Arsenal becomes the
+    promoted club's. No Coventry data is used, which is the point, because
+    Coventry's data is the part that does not transfer.
+
+    Venue is honoured where there is enough of it, because Arsenal at home to
+    a bottom side is a different match from Arsenal away at one. Below the
+    threshold it falls back to both venues and says so.
+    """
+    venue = "home" if rated_is_home else "away"
+    split = tier_split(rated_records, tier_map, "bottom", period, venue=venue)
+    used_venue = venue
+
+    if split["matches"] < min_matches:
+        split = tier_split(rated_records, tier_map, "bottom", period, venue=None)
+        used_venue = None
+
+    if split["matches"] < 3:
+        return None
+
+    stats = {}
+    for stat in set(split["for"]) | set(split["against"]):
+        rated = split["for"].get(stat)
+        other = split["against"].get(stat)
+        if rated is None or other is None:
+            continue
+        stats[stat] = [rated, other] if rated_is_home else [other, rated]
+
+    if not stats:
+        return None
+
+    return {
+        "stats": stats,
+        "matches": split["matches"],
+        "venue": used_venue,
+        "opponents": split["opponents"],
+        "tier": "bottom",
+    }
+
+
 # A rating is only meaningful if it was fitted against opponents whose own
 # ratings are known. A promoted club's last ten matches were all played in a
 # division nobody else here belongs to, so almost every one of them is

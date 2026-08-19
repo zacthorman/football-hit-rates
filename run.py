@@ -160,9 +160,48 @@ def league_ratings_for(tournament_id: int | None, games: int) -> tuple[dict, dic
     return _RATINGS_CACHE[tournament_id]
 
 
+_TIER_CACHE: dict = {}
+
+# Which division sits directly below each one. Used to stack last season's
+# tables so a promoted club ranks below every club in the division above.
+DIVISION_BELOW = {
+    17: 18,     # Premier League -> Championship
+}
+
+
+def tier_map_for(tournament_id: int | None) -> dict:
+    """Club to standard of opposition, from last season's final tables.
+
+    Last season, not this one: in August the current table is three games
+    old and would put whoever won on the opening weekend in the top six.
+    """
+    if tournament_id is None:
+        return {}
+    if tournament_id in _TIER_CACHE:
+        return _TIER_CACHE[tournament_id]
+
+    tables = []
+    for tid in (tournament_id, DIVISION_BELOW.get(tournament_id)):
+        if tid is None:
+            continue
+        season = api.previous_season_id(tid)
+        if season is None:
+            continue
+        table = api.tournament_table(tid, season)
+        if table:
+            tables.append(table)
+            print(f"  read last season's table: {len(table)} clubs")
+
+    tier_map = hitrates.build_tier_map(tables)
+    if not tier_map:
+        print("  couldn't read last season's tables, skipping the tier view")
+    _TIER_CACHE[tournament_id] = tier_map
+    return tier_map
+
+
 def build_fixture(
     event: dict, games: int, players: bool, h2h: bool = False,
-    adjust: bool = False, all_stats: bool = False,
+    adjust: bool = False, all_stats: bool = False, tiers: bool = False,
 ) -> dict | None:
     """Gather everything the report needs for one fixture."""
     home = event["homeTeam"]
@@ -245,6 +284,43 @@ def build_fixture(
             if thin:
                 entry["ratingNotes"] = thin
 
+    # The standard-of-opposition view. It answers the question the ratings
+    # cannot when one side is promoted: not "how good is Coventry", which
+    # nothing here can know, but "what do Arsenal do to sides of that
+    # standard", which their own record answers directly.
+    if tiers:
+        tier_map = tier_map_for(unique_id)
+        if tier_map:
+            entry["tiers"] = {
+                "map": {str(k): v for k, v in tier_map.items()},
+                "labels": hitrates.TIER_LABELS,
+                "of": [
+                    hitrates.tier_of(tier_map, home["id"]),
+                    hitrates.tier_of(tier_map, away["id"]),
+                ],
+            }
+
+            # If the fitted model gave up on one side, fall back to the
+            # other side's record against that standard, and mark it so the
+            # report can say where the number came from.
+            if "projection" not in entry or entry.get("ratingNotes"):
+                home_rated = hitrates.tier_of(tier_map, away["id"]) == "bottom"
+                rated_index = 0 if home_rated else 1
+                fallback = hitrates.tier_projection(
+                    rated_records=records[rated_index],
+                    tier_map=tier_map,
+                    opponent_id=(away if home_rated else home)["id"],
+                    rated_is_home=home_rated,
+                )
+                if fallback:
+                    entry["tierProjection"] = fallback
+                    entry["tierProjectionFrom"] = (home if home_rated else away)["name"]
+                    print(
+                        f"  tier projection from {entry['tierProjectionFrom']}'s "
+                        f"record against bottom-tier sides "
+                        f"({fallback['matches']} matches)"
+                    )
+
     if h2h:
         h2h_records = hitrates.head_to_head(
             event_id=event["id"], home_id=home["id"], away_id=away["id"], limit=games
@@ -285,12 +361,12 @@ def build_fixture(
 def build(
     events: list[dict], games: int, open_browser: bool,
     players: bool, h2h: bool = False, adjust: bool = False,
-    all_stats: bool = False,
+    all_stats: bool = False, tiers: bool = False,
 ) -> Path:
     fixtures = []
     for i, event in enumerate(events, start=1):
         print(f"\n[{i}/{len(events)}]", end="")
-        entry = build_fixture(event, games, players, h2h, adjust, all_stats)
+        entry = build_fixture(event, games, players, h2h, adjust, all_stats, tiers)
         if entry:
             fixtures.append(entry)
 
@@ -396,6 +472,7 @@ def demo() -> Path:
                 "id": rng.randint(10**6, 10**7),
                 "date": f"2026-0{3 + i // 5}-{(i * 3) % 28 + 1:02d}",
                 "opponent": opponents[i],
+                "opponent_id": 1000 + i,
                 "venue": "home" if i % 2 == 0 else "away",
                 "goals_for": rng.randint(0, 3),
                 "goals_against": rng.randint(0, 3),
@@ -480,7 +557,43 @@ def demo() -> Path:
             "h2hLines": hitrates.suggest_lines(meetings, h2h_names),
         }
 
+    # A demo tier map, so the Opposition control and the promoted-side
+    # fallback can both be checked without touching the network. The ten
+    # demo opponents are stacked top to bottom in the order they are listed.
+    demo_tiers = {
+        str(1000 + i): ("top" if i < 3 else "upper" if i < 5
+                        else "lower" if i < 7 else "bottom")
+        for i in range(10)
+    }
+
     fixtures = [one("Espanyol", "Levante UD"), one("Getafe", "Rayo Vallecano")]
+
+    for entry in fixtures:
+        entry["tiers"] = {
+            "map": demo_tiers,
+            "labels": hitrates.TIER_LABELS,
+            "of": ["upper", "bottom"],
+        }
+
+    # Second fixture stands in for Arsenal v Coventry: the away side cannot
+    # be rated, so the fitted projection is removed and the estimate from the
+    # rated side's record against bottom-tier opposition takes its place.
+    promoted = fixtures[1]
+    promoted.pop("projection", None)
+    promoted["ratingNotes"] = [
+        "Rayo Vallecano: only 1 of their recent matches were against a team "
+        "in this division, so no opponent-adjusted projection is shown for them"
+    ]
+    promoted["tierProjection"] = hitrates.tier_projection(
+        rated_records=promoted["records"][0],
+        tier_map={1000 + i: v for i, v in enumerate(
+            ["top", "top", "top", "upper", "upper", "lower", "lower",
+             "bottom", "bottom", "bottom"])},
+        opponent_id=9999,
+        rated_is_home=True,
+        min_matches=2,
+    )
+    promoted["tierProjectionFrom"] = "Getafe"
     for entry in fixtures:
         print_summary(entry)
 
@@ -538,6 +651,12 @@ def main() -> None:
     parser.add_argument(
         "--players", action="store_true",
         help="also fetch per-player stats (one extra request per match)",
+    )
+    parser.add_argument(
+        "--tiers", action="store_true",
+        help="split each team's record by the standard of the opposition, "
+             "and project promoted fixtures from the rated side's record "
+             "against bottom-tier opponents (wants --games 38)",
     )
     parser.add_argument("--no-open", action="store_true", help="don't launch a browser")
     parser.add_argument("--demo", action="store_true", help="synthetic data, no network")
@@ -636,7 +755,7 @@ def main_for(args) -> None:
             print(f"  {describe(event)}")
 
         build(events, args.games, not args.no_open, args.players,
-              args.h2h, args.adjust, args.all_stats)
+              args.h2h, args.adjust, args.all_stats, args.tiers)
         return
 
     if args.team is None:
@@ -658,7 +777,7 @@ def main_for(args) -> None:
 
     picks = parse_picks(args.pick, len(events))
     build([events[i] for i in picks], args.games, not args.no_open,
-          args.players, args.h2h, args.adjust, args.all_stats)
+          args.players, args.h2h, args.adjust, args.all_stats, args.tiers)
 
 
 if __name__ == "__main__":

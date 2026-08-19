@@ -346,6 +346,10 @@ select, .num-input {
 }
 .proj b { font-weight: 680; color: var(--text-primary); }
 .proj.conflict { color: var(--miss); }
+/* Dotted underline on an estimate, so it never reads as the fitted number.
+   Hover gives the matches it came from. */
+.proj.est { border-bottom: 1px dotted var(--border); display: inline-block; }
+.proj.est b { font-weight: 600; }
 .chance { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 
 .tooltip {
@@ -403,6 +407,7 @@ let SUGGESTED_H2H = {};
 
 let games = 10;
 let venue = "all";
+let tier  = "all";
 let tab = "team";
 let period = "ALL";
 let scope = "core";
@@ -462,9 +467,21 @@ function activeStats() {
   return (bucket || {})[period] || [];
 }
 
+/* Standard of opposition. A club missing from last season's tables came up
+   from a lower division, so it counts as bottom rather than unknown: putting
+   it in mid-table by accident is the mistake this whole feature exists to
+   stop. */
+function tierOf(opponentId) {
+  const map = (DATA.tiers || {}).map || {};
+  return map[String(opponentId)] || "bottom";
+}
+
 function filtered(records) {
   let rows = records;
   if (venue !== "all") rows = rows.filter(r => r.venue === venue);
+  if (tier !== "all" && DATA.tiers) {
+    rows = rows.filter(r => tierOf(r.opponent_id) === tier);
+  }
   return rows.slice(-games);
 }
 
@@ -555,11 +572,22 @@ function mismatchWarning() {
 function ratingsWarning() {
   const notes = DATA.ratingNotes || [];
   if (!notes.length) return "";
+  const tp = DATA.tierProjection;
+  const fallback = tp
+    ? ` Instead, the <b>est</b> figures come from ${DATA.tierProjectionFrom}'s
+        own record against bottom-tier sides: ${tp.matches}
+        match${tp.matches === 1 ? "" : "es"}${tp.venue ? ` at ${tp.venue}` : ""}
+        against ${tp.opponents.join(", ")}. That uses no data at all from the
+        promoted side, which is the point, because their data is the part
+        that does not carry across divisions. Hover any estimate to see the
+        matches behind it.`
+    : "";
+
   return `<div class="warn">
     <strong>No adjusted projection.</strong> ${notes.join("; ")}.
     The raw hit rates below are still real, but nothing has corrected them
     for the standard of opposition, so read them as what happened rather
-    than what to expect.
+    than what to expect.${fallback}
   </div>`;
 }
 
@@ -659,7 +687,18 @@ function sideHtml(rows, statName, line, index) {
    from the record, because that is exactly the case worth catching: a true
    100% that the model expects to fail. */
 function projectionHtml(name, line) {
-  const proj = (DATA.projection || {})[period];
+  let proj = (DATA.projection || {})[period];
+  let fromTier = false;
+
+  // No fitted projection means one side could not be rated, which in
+  // practice means they are promoted. Fall back to what the rated side does
+  // to teams of that standard. Only the full match is available that way,
+  // because the tier record is kept whole rather than split by half.
+  if ((!proj || !proj[name]) && DATA.tierProjection && period === "ALL") {
+    proj = DATA.tierProjection.stats;
+    fromTier = true;
+  }
+
   if (!proj || !proj[name] || line === undefined) return "";
 
   const values = proj[name];
@@ -682,9 +721,18 @@ function projectionHtml(name, line) {
     ? `<b>${values[shown[0]]}</b>`
     : `<b>${values[0]}</b> v <b>${values[1]}</b>`;
 
-  return `<div class="proj${conflict ? " conflict" : ""}"
-    title="Expected in this fixture, from opponent-adjusted ratings">
-    proj ${text}${conflict ? " (record disagrees)" : ""}</div>`;
+  const tp = DATA.tierProjection;
+  const label = fromTier ? "est" : "proj";
+  const why = fromTier
+    ? `${DATA.tierProjectionFrom} against bottom-tier sides, `
+      + `${tp.matches} match${tp.matches === 1 ? "" : "es"}`
+      + (tp.venue ? ` at ${tp.venue}` : ", home and away")
+      + `: ${tp.opponents.join(", ")}`
+    : "Expected in this fixture, from opponent-adjusted ratings";
+
+  return `<div class="proj${conflict ? " conflict" : ""}${fromTier ? " est" : ""}"
+    title="${why}">
+    ${label} ${text}${conflict ? " (record disagrees)" : ""}</div>`;
 }
 
 function visibleStats() {
@@ -1308,6 +1356,18 @@ function applyFixture() {
     b.setAttribute("aria-pressed", b.dataset.period === period);
   });
 
+  // The opposition filter is only meaningful when last season's tables were
+  // read, and only some fixtures are built with them.
+  const tierGroup = document.getElementById("tier-group");
+  if (tierGroup) {
+    tierGroup.hidden = !DATA.tiers;
+    if (!DATA.tiers && tier !== "all") {
+      tier = "all";
+      document.querySelectorAll("[data-tier]").forEach(b =>
+        b.setAttribute("aria-pressed", b.dataset.tier === "all"));
+    }
+  }
+
   document.getElementById("competition").textContent = DATA.fixture.competition;
   document.getElementById("title").textContent =
     `${DATA.fixture.home} v ${DATA.fixture.away}`;
@@ -1407,6 +1467,7 @@ segment("games", v => {
   if (tab === "players") playerView();
   if (tab === "standout") standoutView();
 });
+segment("tier", v => { tier = v; render(); if (tab === "players") playerView(); });
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
 segment("period", v => { period = v; render(); });
 segment("source", v => { source = v; render(); });
@@ -1658,6 +1719,21 @@ def build_html(payload: dict) -> str:
       <button type="button" data-venue="all" aria-pressed="true">All</button>
       <button type="button" data-venue="home" aria-pressed="false">Home</button>
       <button type="button" data-venue="away" aria-pressed="false">Away</button>
+    </div>
+  </div>
+
+  <div class="control-group" id="tier-group" hidden>
+    <span class="control-label">Opposition</span>
+    <div class="seg">
+      <button type="button" data-tier="all" aria-pressed="true">All</button>
+      <button type="button" data-tier="top" aria-pressed="false"
+              title="Sides that finished in the top six last season">Top 6</button>
+      <button type="button" data-tier="upper" aria-pressed="false"
+              title="Finished 7th to 11th last season">Upper</button>
+      <button type="button" data-tier="lower" aria-pressed="false"
+              title="Finished 12th to 17th last season">Lower</button>
+      <button type="button" data-tier="bottom" aria-pressed="false"
+              title="Finished 18th or below, plus every promoted side">Bottom</button>
     </div>
   </div>
 

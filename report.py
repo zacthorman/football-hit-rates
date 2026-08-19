@@ -411,6 +411,13 @@ select, .num-input {
 }
 .pick-foot b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .pick-foot .add-btn { margin-left: auto; }
+.need-cell { display: inline-flex; align-items: baseline; gap: 5px; }
+.src {
+  font-size: 10.5px; font-weight: 600; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 5px; padding: 0 5px;
+  white-space: nowrap;
+}
+.src.warnsrc { color: var(--miss); border-color: var(--miss); }
 .agree { font-size: 12.5px; }
 .agree.yes { color: var(--hit); }
 .agree.no  { color: var(--miss); }
@@ -979,6 +986,175 @@ function fmtOdds(o) {
   return o >= 10 ? o.toFixed(0) : o.toFixed(2);
 }
 
+/* ------------------------------------------------------------ count model
+
+   The old `need` price looked only at how many matches went over the line and
+   how many did not. That throws away almost everything: 4,5,3,6,4 corners and
+   2,2,2,2,2 corners are both "5 from 5 over 1.5", and one of them is far
+   safer than the other. It also never looked at the opponent, so Arsenal at
+   home to Coventry priced the same as Arsenal away at City.
+
+   So the price now comes from a count model instead:
+
+     1. Take the opponent-adjusted expectation for this team in this fixture.
+        That is the projection already on the page: league average times this
+        team's attack rating times this opponent's defence rating, off the
+        right home or away base. This is where the mismatch enters.
+
+     2. Fit the spread from the team's own matches. If the variance is close
+        to the mean, counts behave like a Poisson process and Poisson is used.
+        If the variance is bigger, which is normal for shots, the negative
+        binomial handles the extra spread rather than pretending it is not
+        there and quoting a price that is too short.
+
+     3. Read the probability straight off that distribution: for a line of
+        1.5, P(X >= 2).
+
+     4. Haircut for the fact that the expectation is itself estimated, by
+        recomputing at the bottom of a one-sided 95% interval on the mean.
+
+   The result moves continuously with the matchup, which is the entire point.
+   A dominant side against a poor one lands near 1.07; a coin flip lands near
+   2.00; and two different 19-from-20 records no longer both come out at
+   1.31. */
+
+const LG_C = [676.5203681218851, -1259.1392167224028, 771.32342877765313,
+              -176.61502916214059, 12.507343278686905, -0.13857109526572012,
+              9.9843695780195716e-6, 1.5056327351493116e-7];
+
+function logGamma(z) {
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z);
+  z -= 1;
+  let x = 0.99999999999980993;
+  for (let i = 0; i < 8; i++) x += LG_C[i] / (z + i + 1);
+  const t = z + 7.5;
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+}
+
+function poissonCdf(k, mean) {
+  if (mean <= 0) return 1;
+  if (k < 0) return 0;
+  let term = Math.exp(-mean), sum = term;
+  for (let i = 1; i <= k; i++) { term *= mean / i; sum += term; }
+  return Math.min(1, sum);
+}
+
+function negBinCdf(k, mean, size) {
+  if (mean <= 0) return 1;
+  if (k < 0) return 0;
+  const p = size / (size + mean);
+  let sum = 0;
+  for (let i = 0; i <= k; i++) {
+    sum += Math.exp(logGamma(i + size) - logGamma(i + 1) - logGamma(size)
+                    + size * Math.log(p) + i * Math.log1p(-p));
+  }
+  return Math.min(1, sum);
+}
+
+/* P(count > line) for a half-integer line. A line of 1.5 means 2 or more, so
+   the question is P(X <= 1), hence the floor. */
+function probOver(line, mean, vals) {
+  if (mean <= 0) return 0;
+  const k = Math.floor(line);
+
+  const n = vals.length;
+  if (n >= 3) {
+    const m = vals.reduce((s, v) => s + v, 0) / n;
+    const v = vals.reduce((s, x) => s + (x - m) * (x - m), 0) / (n - 1);
+    // Overdispersed: use the negative binomial, carrying the spread observed
+    // in the sample over onto the projected mean.
+    if (v > m * 1.05 && m > 0) {
+      const size = (m * m) / (v - m);
+      if (isFinite(size) && size > 0) return 1 - negBinCdf(k, mean, size);
+    }
+  }
+  return 1 - poissonCdf(k, mean);
+}
+
+/* One place that turns a row into a price, so the slip, the best bets and the
+   standout list cannot disagree with each other.
+
+   `p` is the probability of the bet landing, `fair` is what that is worth, and
+   `need` is what you should insist on before staking. When the fixture has an
+   opponent-adjusted expectation the count model supplies all three. When it
+   does not, which means one side could not be rated, it falls back to the old
+   record-only interval and says so, because a made-up expectation would be
+   worse than an honest blunt one. */
+function priceRow(r) {
+  const values = (r.forVals || r.vals || []);
+  const expected = expectedFor(r);
+
+  if (expected !== undefined && expected > 0 && values.length >= 3) {
+    const n = values.length;
+    const mean = values.reduce((s, v) => s + v, 0) / n;
+    const variance = values.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1);
+    const se = Math.sqrt(Math.max(variance, 1e-9) / n);
+
+    // One-sided 95% band on the expectation. The projection is an estimate,
+    // and pricing off the point estimate assumes it is exact.
+    //
+    // The band is clipped to half and double the expectation. Ten matches of a
+    // noisy stat can produce a standard error big enough to drag the lower
+    // bound to nothing, and a bound of nothing prices everything at 20.0,
+    // which is not caution, it is just noise wearing caution's clothes. A
+    // fifty per cent haircut is already a severe one.
+    const low = Math.max(expected * 0.5, expected - 1.645 * se);
+    const highBand = Math.min(expected * 2, expected + 1.645 * se);
+
+    let p = probOver(r.line, expected, values);
+    let pLow = probOver(r.line, low, values);
+    if (!r.over) { p = 1 - p; pLow = 1 - probOver(r.line, highBand, values); }
+
+    // Both ends of the interval on the expectation, so a contradiction can be
+    // detected rather than priced. If the record's own lower bound sits above
+    // everything the model will allow even at its most generous, then one of
+    // the two is wrong and neither should be trusted. That happens when a
+    // ratings fit produces something absurd, like an expectation of 0.03
+    // first-half offsides for a team that gets one nearly every half.
+    const pHigh = r.over ? probOver(r.line, highBand, values)
+                         : 1 - probOver(r.line, low, values);
+
+    // A second, blunter sanity check on the expectation itself. An opponent
+    // adjustment should move a team's average, that is its whole job, but it
+    // should not halve it or double it. When it does, the ratings fit for that
+    // stat and period has gone wrong rather than found something. The case
+    // that exposed this was an expected 0.46 second-half offsides for a side
+    // that had gone over 0.5 in thirteen of twenty, which then priced at 21.
+    const absurd = expected < 0.5 * mean || expected > 2 * mean;
+
+    const conflict = absurd || r.score > pHigh + 0.05;
+
+    return {
+      p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),
+      expected, source: "model", conflict,
+      recordFair: fairOdds(r.k / r.n), recordNeed: fairOdds(r.score),
+    };
+  }
+
+  return {
+    p: r.k / r.n, fair: fairOdds(r.k / r.n), need: fairOdds(r.score),
+    expected: undefined, source: "record",
+    recordFair: fairOdds(r.k / r.n), recordNeed: fairOdds(r.score),
+  };
+}
+
+/* The opponent-adjusted expectation for the team this bet is on. Falls back to
+   the cross-division estimate when the fitted one is missing. */
+function expectedFor(r) {
+  const fx = ALL.fixtures[r.fixtureIndex];
+  if (!fx) return undefined;
+  const idx = r.teamIndex;
+
+  const fitted = ((fx.projection || {})[r.period] || {})[r.stat];
+  if (fitted && fitted[idx] !== undefined) return fitted[idx];
+
+  if (r.period === "ALL" && fx.tierProjection) {
+    const est = (fx.tierProjection.stats || {})[r.stat];
+    if (est && est[idx] !== undefined) return est[idx];
+  }
+  return undefined;
+}
+
 const VENUE_SPLITS = [
   { key: "all", label: "All matches" },
   { key: "home", label: "At home" },
@@ -1258,7 +1434,7 @@ function scanMatchups(minSample) {
 function bestBetsView() {
   const minSample = parseInt(document.getElementById("bmin").value, 10) || 4;
   const limit = parseInt(document.getElementById("btop").value, 10) || 10;
-  const { found, combos, skipped } = scanMatchups(minSample);
+  let { found, combos, skipped } = scanMatchups(minSample);
 
   const periodName = p => (ALL.periods && ALL.periods[p]) || p;
   const target = document.getElementById("bestbets");
@@ -1269,6 +1445,33 @@ function bestBetsView() {
       matches each. Lower the minimum, or build with more games.</p>`;
     window.__best = [];
     return;
+  }
+
+  // Now that prices actually vary, one ordering no longer suits. Evidence puts
+  // the best-supported records first. Likely sorts by the model's probability,
+  // which favours mismatches. Price sorts the other way, surfacing the ones
+  // that pay something, which are the ones worth pricing up against a book.
+  const order = document.querySelector("[data-border][aria-pressed='true']")
+    ?.dataset.border || "evidence";
+
+  found.forEach(r => { r.price = r.price || priceRow(r); });
+
+  // Drop the ones where the count model and the record cannot both be right.
+  const contradictory = found.filter(r => r.price.conflict).length;
+  found = found.filter(r => !r.price.conflict);
+
+  if (!found.length) {
+    target.innerHTML = `<p class="empty">Everything that qualified was thrown
+      out because the model and the record contradicted each other. That
+      usually means the ratings fit is thin for this competition.</p>`;
+    window.__best = [];
+    return;
+  }
+
+  if (order !== "evidence") {
+    found.sort((a, b) => order === "likely"
+      ? a.price.need - b.price.need
+      : b.price.need - a.price.need);
   }
 
   // Grouped by competition, because "top three this gameweek" means three
@@ -1284,9 +1487,10 @@ function bestBetsView() {
     const picks = rows.slice(0, limit);
     const cards = picks.map(r => {
       const i = shown.push(r) - 1;
-      const p = r.k / r.n;
-      const fair = fairOdds(p);
-      const need = fairOdds(r.score);
+      const price = priceRow(r);
+      r.price = price;                      // the slip reads this back
+      const fair = price.fair;
+      const need = price.need;
       const dir = r.over ? "over" : "under";
 
       // The projection, when there is one, is the only thing here that did
@@ -1331,7 +1535,14 @@ function bestBetsView() {
         <div class="pick-foot">
           <span><b>${r.k}/${r.n}</b> combined</span>
           <span>fair <b>${fmtOdds(fair)}</b></span>
-          <span>need <b>${fmtOdds(need)}</b></span>
+          <span class="need-cell">need <b>${fmtOdds(need)}</b>
+            ${price.source === "model"
+              ? `<span class="src" title="Priced from an expected ${price.expected} in this fixture, ` +
+                `read off a fitted count distribution. The record on its own would have said ` +
+                `${fmtOdds(price.recordNeed)}.">${price.expected}&nbsp;exp</span>`
+              : `<span class="src warnsrc" title="No opponent-adjusted expectation for this fixture, ` +
+                `so this is the blunt record-only interval.">record only</span>`}
+          </span>
           <span class="chance">${fmtChance(r.chance)} by chance</span>
           ${agree}
           <button type="button" class="add-btn" data-badd="${i}"
@@ -1371,6 +1582,11 @@ function bestBetsView() {
       what the bookmaker is offering, and the price is the entire bet.
       ${skipped ? `<br><br><strong>${skipped}</strong> pairings were left out
         because one side's record was built in a different competition.` : ""}
+      ${contradictory ? `<br><br><strong>${contradictory}</strong> more were
+        dropped because the count model and the raw record contradicted each
+        other beyond what either one's uncertainty allows. When those two
+        disagree that badly, one of them is wrong and there is no way to tell
+        which from here.` : ""}
     </div>
     ${blocks}`;
 }
@@ -1402,10 +1618,12 @@ function standoutView() {
 
   const rows = shown.map((r, i) => {
     const p = r.k / r.n;
-    const fair = fairOdds(p);
-    const minPrice = fairOdds(r.score);   // r.score is the Wilson lower bound
+    const price = priceRow(r);
+    r.price = price;
+    const fair = price.fair;
+    const minPrice = price.need;
     return `
-    <tr data-row="${i}" data-plow="${r.score}" data-fair="${fair}" data-min="${minPrice}">
+    <tr data-row="${i}" data-plow="${1 / minPrice}" data-fair="${fair}" data-min="${minPrice}">
       <td class="player-name">${r.stat}
         <span class="pos">${periodName(r.period)}</span>
         <span class="sub-line">${r.team} &middot; ${r.split} &middot; ${r.fixture}</span></td>
@@ -1484,7 +1702,7 @@ function scorePick(r, price) {
   if (!price || price <= 1) {
     parts.value = 0;
   } else {
-    const need = 1 / r.score;                 // r.score is the Wilson lower bound
+    const need = (r.price || priceRow(r)).need;
     const ratio = price / need;
     parts.value = Math.max(0, Math.min(45, Math.round((ratio - 0.85) * 150)));
   }
@@ -1535,7 +1753,7 @@ function slipView() {
         <span class="sub-line">${r.team} &middot; ${r.over ? "Over" : "Under"} ${r.line}
           &middot; ${r.fixture}</span></td>
       <td class="num" data-label="Record">${r.k}/${r.n}</td>
-      <td class="odds" data-label="Need">${fmtOdds(1 / r.score)}</td>
+      <td class="odds" data-label="Need">${fmtOdds((r.price || priceRow(r)).need)}</td>
       <td data-label="Your price">
         <input class="price-input" type="number" step="0.05" min="1.01"
                value="${entry.price || ""}" data-slip-price
@@ -1559,7 +1777,10 @@ function slipView() {
 
   if (priced.length > 1) {
     const combined = priced.reduce((acc, s) => acc * s.price, 1);
-    const chance = priced.reduce((acc, s) => acc * s.row.score, 1);
+    // Multiply the supported probabilities, not the raw records, so a long
+    // shot leg is not flattered by a small sample that happened to be perfect.
+    const chance = priced.reduce(
+      (acc, s) => acc * Math.min(0.999, 1 / (s.row.price || priceRow(s.row)).need), 1);
     const fair = 1 / chance;
     const perLeg = Math.pow(fair / combined, 1 / priced.length);
 
@@ -1845,6 +2066,7 @@ segment("games", v => {
   if (tab === "standout") standoutView();
   if (tab === "best") bestBetsView();
 });
+segment("border", () => bestBetsView());
 segment("tier", v => { tier = v; render(); if (tab === "players") playerView(); });
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
 segment("period", v => { period = v; render(); });
@@ -2315,6 +2537,17 @@ def build_html(payload: dict) -> str:
       <span class="control-label">Per competition</span>
       <input class="num-input" id="btop" type="number" step="1" min="1" max="25" value="10"
              aria-label="How many per competition">
+    </div>
+    <div class="control-group">
+      <span class="control-label">Order</span>
+      <div class="seg">
+        <button type="button" data-border="evidence" aria-pressed="true"
+                title="Strongest combined record first">Evidence</button>
+        <button type="button" data-border="likely" aria-pressed="false"
+                title="Shortest price first: the biggest mismatches">Most likely</button>
+        <button type="button" data-border="price" aria-pressed="false"
+                title="Longest price first: the ones that actually pay">Best price</button>
+      </div>
     </div>
   </div>
   <div id="bestbets"></div>

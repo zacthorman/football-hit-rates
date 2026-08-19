@@ -192,6 +192,66 @@ Kick-off times render in the reader's own timezone. The page ships unix
 timestamps and lets the device do it, because a 20:00 UTC kick-off is 21:00 in
 most of Europe and being an hour out is the sort of thing that loses a bet.
 
+## How the Need price is worked out
+
+`Fair` is what the record implies on its own. `Need` is the price to insist on
+before staking. The first version of it was too blunt: it looked only at how
+many matches went over the line and how many did not, so every 19 from 20 came
+out at 1.31 regardless of the fixture. That throws away almost everything. A
+team getting 4, 5, 3, 6, 4 corners and one getting 2, 2, 2, 2, 2 are both
+"5 from 5 over 1.5", and one is far safer. It also never looked at the opponent.
+
+`Need` now comes from a count model:
+
+1. Take the opponent-adjusted expectation for this team in this fixture. That
+   is the projection already on the page: league average times this team's
+   attack rating times this opponent's defence rating, off the right home or
+   away base. This is where the mismatch enters.
+2. Fit the spread from the team's own matches. If the variance is close to the
+   mean, counts behave like a Poisson process and Poisson is used. If the
+   variance is larger, which is normal for shots, a negative binomial carries
+   the extra spread across rather than quoting a price that is too short.
+3. Read the probability off that distribution. A line of 1.5 asks for P(X >= 2).
+4. Haircut for the fact the expectation is itself an estimate, by recomputing
+   at the bottom of a one-sided 95% interval on the mean.
+
+Both distributions were checked against scipy across 54 combinations of mean
+and line, agreeing to machine precision.
+
+The same record now prices very differently depending on who is playing:
+
+| Bet, all on the same shape of 10-match record | Expected | Need |
+|-----------------------------------------------|----------|------|
+| Man City total shots over 9.5 v Bournemouth   | 17.2     | 1.05 |
+| Arsenal first-half corners over 1.5 v Coventry| 3.4      | 1.26 |
+| Arsenal first-half corners over 1.5 v Man City| 2.1      | 2.03 |
+| Bournemouth total shots over 9.5 v Man City   | 9.8      | 2.59 |
+
+Two guards sit on top of it.
+
+The interval on the expectation is clipped to half and double the point
+estimate. Ten matches of a noisy stat can produce a standard error big enough
+to drag the lower bound to nothing, and a bound of nothing prices everything
+at 20.0, which is not caution, it is noise wearing caution's clothes.
+
+A pairing is dropped entirely when the model and the record contradict each
+other beyond what either one's uncertainty allows, or when the projection is
+less than half or more than double the team's own average. An adjustment
+should move a team's average, that is its job, but it should not halve it. The
+case that exposed this was an expected 0.46 second-half offsides for a side
+that had gone over 0.5 in thirteen of twenty, which priced at 21.0. The number
+dropped is shown on the page.
+
+Where there is no opponent-adjusted expectation, which means one side could
+not be rated, it falls back to the old record-only interval and tags the price
+`record only`, because an invented expectation is worse than an honest blunt
+number.
+
+The Best bets tab can be ordered three ways. **Evidence** puts the strongest
+combined records first. **Most likely** sorts by the model's probability, which
+favours mismatches. **Best price** sorts the other way, surfacing the ones that
+actually pay, which are the ones worth pricing up against a bookmaker.
+
 ## Standard of opposition (`--tiers`)
 
 The opponent-adjusted projection needs a rating for both sides, and a

@@ -24,17 +24,15 @@ import sofascore_api as api
 PREFERRED_STATS = [
     "Total shots",
     "Shots on target",
-    "Shots off target",
-    "Blocked shots",
     "Corner kicks",
-    "Offsides",
     "Fouls",
-    "Yellow cards",
-    "Throw-ins",
-    "Big chances",
-    "Ball possession",
-    "Passes",
     "Tackles",
+    "Offsides",
+    "Throw-ins",
+    "Yellow cards",
+    "Red cards",
+    "Free kicks",
+    "Goal kicks",
 ]
 
 # Stats where a hit-rate line makes no sense or reads oddly.
@@ -46,42 +44,41 @@ SKIP_STATS = {"Ball possession"}
 # combination for the Standout scan to trawl through and another chance for
 # a coincidence to look like a finding. Pass --all-stats to see everything.
 BETTABLE_STATS = {
-    "Total shots",
-    "Shots on target",
-    "Shots off target",
-    "Blocked shots",
-    "Shots inside box",
-    "Shots outside box",
-    "Corner kicks",
-    "Offsides",
-    "Throw-ins",
-    "Fouls",
-    "Yellow cards",
-    "Red cards",
-    "Goal kicks",
-    "Free kicks",
-    "Tackles",
-    "Big chances",
+    # Matched against the markets bet365 actually prices on a football match.
+    # Anything the endpoint returns that has no market attached is dropped:
+    # it cannot be bet, and every extra row is another combination for the
+    # Standout scan to trawl and another chance for a fluke to look like a
+    # finding. Use --all-stats to see everything again.
+    "Total shots",        # Total Shots
+    "Shots on target",    # Total Shots on Target
+    "Corner kicks",       # Corners
+    "Offsides",           # Total Offsides
+    "Tackles",            # Total Tackles
+    "Fouls",              # Fouls Committed, and Fouls Won via the Against measure
+    "Yellow cards",       # Cards
+    "Red cards",          # Red Card in Match / Half
+    "Throw-ins",          # Throw Ins
+    "Goal kicks",         # Goal Kicks
+    "Free kicks",         # Free Kicks
 }
 
 # The same idea for player props.
 BETTABLE_PLAYER_STATS = {
-    "Shots",
-    "Shots on target",
-    "Goals",
-    "Assists",
-    "Tackles",
-    "Fouls",
-    "Fouled",
-    "Offsides",
-    "Clearances",
-    "Interceptions",
-    "Passes",
-    "Crosses",
-    "Saves",
-    "Minutes",          # not a market, but it decides whether the rest matter
+    "Shots",              # Shots
+    "Shots on target",    # Shots on Target
+    "Goals",              # Player to Score
+    "Assists",            # Score or Assist
+    "Tackles",            # Tackles
+    "Fouls",              # Fouls Committed
+    "Fouled",             # To Be Fouled
+    "Passes",             # Passes
+    "Saves",              # Goalkeeper Saves
+    "Minutes",            # not a market, but it decides whether the rest matter
 }
 
+# Dropped because bet365 prices them but SofaScore does not report them per
+# player, so there is nothing to build a hit rate from: headed shots on
+# target, shots on target outside the box, and player cards.
 
 def _as_number(value):
     """Coerce a statistics value to a float, or None if it isn't one.
@@ -354,16 +351,13 @@ PLAYER_STAT_NAMES = {
 PLAYER_STAT_ORDER = [
     "Shots",
     "Shots on target",
+    "Goals",
+    "Assists",
     "Tackles",
-    "Passes",
-    "Key passes",
-    "Duels won",
     "Fouls",
     "Fouled",
-    "Clearances",
-    "Interceptions",
-    "Touches",
-    "Rating",
+    "Passes",
+    "Saves",
     "Minutes",
 ]
 

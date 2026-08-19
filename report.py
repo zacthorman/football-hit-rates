@@ -103,6 +103,14 @@ header { margin-bottom: 18px; }
 }
 h1 { font-size: 30px; font-weight: 680; margin: 0 0 5px; letter-spacing: -0.015em; }
 .kickoff { color: var(--text-secondary); font-size: 14px; }
+.back {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-secondary); text-decoration: none;
+  font-size: 13.5px; font-weight: 600; margin-bottom: 12px;
+  border: 1px solid var(--border); background: var(--surface-1);
+  border-radius: 8px; padding: 6px 12px;
+}
+.back:hover { color: var(--text-primary); }
 
 /* ----------------------------------------------------------- controls */
 
@@ -416,7 +424,7 @@ const STRONG_LOW = 20;
    with --all-stats. */
 const CORE_STATS = [
   "Total shots", "Shots on target", "Corner kicks",
-  "Fouls", "Offsides", "Throw-ins", "Yellow cards",
+  "Fouls", "Tackles", "Offsides", "Throw-ins", "Yellow cards",
 ];
 
 const VARS = ["--team-1", "--team-2"];
@@ -1605,6 +1613,7 @@ def build_html(payload: dict) -> str:
 <div class="wrap">
 
 <header>
+  <a class="back" href="../index.html">&lsaquo; All fixtures</a>
   <div class="competition" id="competition">{fixture.get('competition', 'Football')}</div>
   <h1 id="title">{fixture['home']} v {fixture['away']}</h1>
   <div class="kickoff" id="kickoff">{fixture.get('date', '')}</div>

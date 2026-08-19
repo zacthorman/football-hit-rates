@@ -12,6 +12,7 @@ Run it after building reports, then commit and push.
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import re
@@ -58,6 +59,13 @@ def read_report(path: Path) -> tuple[str, int, list[str], int]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--keep-played", action="store_true", dest="keep_played",
+                        help="keep reports whose fixtures have all been played")
+    parser.add_argument("--prune", action="store_true",
+                        help="also delete the files of fully played reports")
+    args = parser.parse_args()
+
     if not REPORTS.exists():
         raise SystemExit("No reports/ folder yet. Build a report first.")
 
@@ -70,9 +78,17 @@ def main() -> None:
         raise SystemExit("No reports found in reports/.")
 
     rows = []
+    dropped = []
     for path in files:
         built = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         title, count, names, upcoming = read_report(path)
+
+        # A report whose fixtures have all kicked off is history. Dimming it
+        # still leaves it on the page taking up attention, so it comes off
+        # the list entirely unless you ask for it.
+        if upcoming == 0 and not args.keep_played:
+            dropped.append(path)
+            continue
 
         if count > 1:
             heading = f"{count} fixtures"
@@ -81,8 +97,6 @@ def main() -> None:
             heading = title
             detail = ""
 
-        # A report whose fixtures have all been played is history, not a
-        # preview. Say so rather than leaving you to click and find out.
         if upcoming == 0:
             state = "all played"
         elif upcoming == count:
@@ -155,7 +169,8 @@ footer {{ margin-top: 24px; color: var(--muted); font-size: 13px; }}
   <h1>Football hit rates</h1>
   <p class="sub">Team and player hit rates by fixture, from SofaScore data.</p>
   <ul>
-    {chr(10).join("    " + row for row in rows)}
+    {chr(10).join("    " + row for row in rows) if rows
+     else '    <li><span class="meta">Every fixture has been played. Build a new round.</span></li>'}
   </ul>
   <footer>
     Index built {generated}. Each report is a snapshot: the numbers are frozen
@@ -168,7 +183,18 @@ footer {{ margin-top: 24px; color: var(--muted); font-size: 13px; }}
 
     out = ROOT / "index.html"
     out.write_text(page, encoding="utf-8")
-    print(f"Indexed {len(files)} report(s) into {out}")
+    print(f"Indexed {len(rows)} report(s) into {out}")
+
+    if dropped:
+        print(f"Left out {len(dropped)} fully played report(s):")
+        for path in dropped:
+            print(f"  {path.name}")
+        if args.prune:
+            for path in dropped:
+                path.unlink()
+            print("Deleted them. They can be rebuilt from the cache if needed.")
+        else:
+            print("Add --prune to delete their files too.")
 
 
 if __name__ == "__main__":

@@ -1925,18 +1925,30 @@ function fillFixtures() {
    reorders or drops fixtures, which happens every week. */
 function applyDeepLink() {
   const match = /^#e(\d+)$/.exec(location.hash || "");
-  if (!match) return;
+  if (!match) return false;
+
   const wanted = parseInt(match[1], 10);
   const found = ALL.fixtures.findIndex(f => f.fixture.id === wanted);
-  if (found >= 0) {
-    DATA = ALL.fixtures[found];
-    if ((DATA.fixture.kickoff || 0) <= Date.now() / 1000) showPast = true;
-    applyFixture();
+  if (found < 0) return false;
+
+  DATA = ALL.fixtures[found];
+
+  // A fixture that has already kicked off is filtered out of the dropdown by
+  // default, so linking to one has to turn the filter off or the selection
+  // gets thrown straight back to the first upcoming match.
+  if ((DATA.fixture.kickoff || 0) <= Date.now() / 1000 && !showPast) {
+    showPast = true;
+    fillFixtures();
   }
+
+  // The dropdown is the visible truth. Leaving it pointing at a different
+  // fixture from the one on screen is worse than not linking at all.
+  fixtureSelect.value = String(found);
+  applyFixture();
+  return true;
 }
 
-applyDeepLink();
-window.addEventListener("hashchange", () => { applyDeepLink(); fillFixtures(); });
+window.addEventListener("hashchange", applyDeepLink);
 
 if (ALL.fixtures.length > 1) {
   fixtureSelect.addEventListener("change", () => {
@@ -1948,6 +1960,11 @@ if (ALL.fixtures.length > 1) {
     fillFixtures();
   });
   fillFixtures();
+  // After fillFixtures, never before. fillFixtures resets the selection to
+  // the first upcoming fixture whenever the current one is not in its list,
+  // so calling this first meant the deep link was silently overwritten and
+  // the link landed on whatever happened to be at the top.
+  applyDeepLink();
 } else {
   document.getElementById("fixture-group").hidden = true;
   pastToggle.hidden = true;

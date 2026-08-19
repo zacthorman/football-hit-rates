@@ -1,0 +1,22 @@
+[
+  {
+    "logged_at": "2026-08-19T14:37:36+00:00",
+    "event_id": 16391149,
+    "fixture": "Derby County v Cardiff City",
+    "kickoff": 1787407200,
+    "team_id": 61,
+    "team": "Cardiff City",
+    "stat": "Total shots",
+    "period": "ALL",
+    "line": 12.5,
+    "side": "over",
+    "price": 1.95,
+    "stake": 1.0,
+    "model_rate": null,
+    "model_need": 1.68,
+    "model_proj": null,
+    "result": null,
+    "value": null,
+    "profit": null
+  }
+]

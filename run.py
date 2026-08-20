@@ -752,9 +752,9 @@ def main_for(args) -> None:
     # take each team's next fixture. Two teams playing each other collapse
     # to one fixture, so 20 clubs give you a 10-match round.
     if args.league:
-        key = args.league.lower().replace("-", "_").replace(" ", "_")
-        tournament_id = api.TOURNAMENTS.get(key)
+        tournament_id = api.tournament_id_for(args.league)
         if tournament_id is None:
+            key = args.league.lower().replace("-", "_").replace(" ", "_")
             if key.isdigit():
                 tournament_id = int(key)
             else:

@@ -39,9 +39,14 @@ ROOT = Path(__file__).parent
 CONFIG = ROOT / "update.json"
 LOG = ROOT / "update.log"
 LOCK = ROOT / ".update.lock"
+STATUS = ROOT / ".last_run.json"
+
+# A run is considered overdue after this long. Daily job, so a day and a half
+# allows for one missed morning without crying wolf.
+STALE_HOURS = 36
 
 DEFAULTS = {
-    "leagues": ["Premier League", "Championship", "LaLiga", "Serie A",
+    "leagues": ["Premier League", "Championship", "La Liga", "Serie A",
                 "Bundesliga", "Ligue 1"],
     "games": 38,
     "players": True,
@@ -72,28 +77,121 @@ def load_config() -> dict:
 
 
 def say(message: str) -> None:
-    """Print and log at once. A scheduled run has nobody watching the terminal."""
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    """Print and log at once. A scheduled run has nobody watching the terminal.
+
+    Local time with the offset, not bare UTC. A log stamped 21:02 next to a
+    terminal showing 22:02 reads as an hour of silence, and an hour of silence
+    on a job like this reads as a hang. It cost a round of debugging once
+    already, on a job that was working perfectly.
+    """
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     line = f"{stamp}  {message}"
     print(line, flush=True)
     with LOG.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
 
 
+def fail(message: str) -> None:
+    """Record the failure, push a notification, and stop.
+
+    Every failure path goes through here so none of them can forget to do one
+    of the three things. A run that dies without recording it looks identical
+    to a run that never started.
+    """
+    write_status(False, message)
+    notify("Football stats update failed", message)
+    raise SystemExit(1)
+
+
+def notify(title: str, message: str) -> None:
+    """A macOS notification, best effort.
+
+    This is the point of the whole status mechanism. A scheduled job that
+    fails quietly is worse than no job at all, because you carry on trusting
+    a site that stopped updating on Tuesday. Pushing the failure at you beats
+    remembering to go and look for it.
+    """
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification {json.dumps(message)} with title {json.dumps(title)}'],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass          # not a Mac, or notifications are off. Never fatal.
+
+
+def write_status(ok: bool, message: str) -> None:
+    STATUS.write_text(json.dumps({
+        "finished": time.time(),
+        "when": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "ok": ok,
+        "message": message,
+    }, indent=2) + "\n", encoding="utf-8")
+
+
+def show_status() -> None:
+    """One screen that answers: is this thing still working?"""
+    if not STATUS.exists():
+        print("No run has finished yet.")
+        return
+
+    data = json.loads(STATUS.read_text(encoding="utf-8"))
+    age_hours = (time.time() - data["finished"]) / 3600
+
+    print(f"last run    {data['when']}")
+    print(f"            {age_hours:.1f} hours ago")
+    print(f"outcome     {'OK' if data['ok'] else 'FAILED'}  {data['message']}")
+
+    if not data["ok"]:
+        print("\n  The last run failed and the site was not updated.")
+        print("  Look at the end of update.log for the reason.")
+    elif age_hours > STALE_HOURS:
+        print(f"\n  Nothing has run for {age_hours:.0f} hours, which is too long.")
+        print("  Check the schedule is still loaded:")
+        print("    launchctl list | grep football")
+    else:
+        print("\n  Healthy.")
+
+    if LOCK.exists():
+        print(f"\n  A run is in progress (pid {LOCK.read_text().strip()}).")
+
+
 def run(command: list[str], dry: bool, allow_fail: bool = False) -> bool:
-    """Run a command, log what happened, and say whether it worked."""
+    """Run a command, streaming its output into the log as it happens.
+
+    Streaming rather than capturing, which is how this was written first. A
+    captured run writes nothing until the command exits, so a three hour fetch
+    produced a log that sat frozen on its first line the entire time and gave
+    no way to tell a working job from a hung one. For anything that runs
+    longer than a few seconds that is the difference between a log and no log.
+
+    PYTHONUNBUFFERED is set for the same reason: without it Python buffers its
+    own stdout when it is writing to a pipe rather than a terminal, and the
+    output arrives in 8KB lumps regardless of what this function does.
+    """
     say("  $ " + " ".join(command))
     if dry:
         return True
 
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-    output = (result.stdout or "") + (result.stderr or "")
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    process = subprocess.Popen(
+        command, cwd=ROOT, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
 
-    for line in output.strip().splitlines()[-25:]:
-        say("    " + line)
+    # run.py rewrites its progress counter with \r rather than newlines, which
+    # would otherwise arrive as one enormous line. Split on both.
+    for raw in process.stdout:
+        for line in raw.replace("\r", "\n").splitlines():
+            if line.strip():
+                say("    " + line.rstrip())
 
-    if result.returncode != 0 and not allow_fail:
-        say(f"  FAILED with exit code {result.returncode}")
+    process.wait()
+
+    if process.returncode != 0 and not allow_fail:
+        say(f"  FAILED with exit code {process.returncode}")
         return False
     return True
 
@@ -123,12 +221,23 @@ def main() -> None:
                         help="build locally, leave git alone")
     parser.add_argument("--only-render", action="store_true", dest="only_render",
                         help="skip fetching, just rebuild pages and index")
+    parser.add_argument("--status", action="store_true",
+                        help="say whether the last run worked, and when it was")
     args = parser.parse_args()
+
+    if args.status:
+        show_status()
+        return
 
     # A second run starting while the first is still fetching would fight over
     # the cache and the git index. The lock carries a pid so a stale one from a
     # crashed run can be told apart from a live one.
-    if LOCK.exists():
+    #
+    # A dry run is exempt: it writes nothing, so refusing to let you look at
+    # the plan while a real run is going is just unhelpful.
+    if LOCK.exists() and args.dry:
+        say("note: a real run is in progress, this dry run changes nothing")
+    elif LOCK.exists():
         try:
             pid = int(LOCK.read_text(encoding="utf-8").strip())
             os.kill(pid, 0)
@@ -156,6 +265,14 @@ def main() -> None:
         say(f"update starting, python {python}")
         say(f"pacing: {env_note}")
 
+        if STATUS.exists():
+            previous = json.loads(STATUS.read_text(encoding="utf-8"))
+            gap = (time.time() - previous["finished"]) / 3600
+            if not previous["ok"]:
+                say(f"note: the previous run failed ({previous['message']})")
+            if gap > STALE_HOURS:
+                say(f"note: nothing has run for {gap:.0f} hours")
+
         # 1. Fetch and build. Each league is its own report, so one failing
         #    competition does not take the others down with it.
         if args.only_render:
@@ -175,19 +292,19 @@ def main() -> None:
                 say("if the log above shows repeated 403s, SofaScore is refusing:")
                 say("  raise delay_min and delay_max in update.json, and build")
                 say("  fewer leagues per run. Cached data still works meanwhile.")
-                raise SystemExit(1)
+                fail("the league build failed, nothing was published")
 
         # 2. Re-render, so reports built by older code pick up new page
         #    features. Cheap: the data is already inside each file.
         if not run([python, "rerender.py"], args.dry):
-            raise SystemExit(1)
+            fail("re-rendering the reports failed")
 
         # 3. Index. Played fixtures come off the front page here.
         index = [python, "make_index.py"]
         if settings.get("prune"):
             index.append("--prune")
         if not run(index, args.dry):
-            raise SystemExit(1)
+            fail("rebuilding the index failed")
 
         # 4. Publish. Only if there is something to publish.
         if args.no_push or not settings.get("push"):
@@ -196,19 +313,25 @@ def main() -> None:
             say("  $ git add -A && git commit && git push && ./publish.sh")
         elif not git_has_changes():
             say("no source changes to commit, publishing the site anyway")
-            run(["./publish.sh"], args.dry)
+            if not run(["./publish.sh"], args.dry):
+                fail("publish.sh failed, the site was not updated")
         else:
             stamp = datetime.now(timezone.utc).strftime("%d %b %Y")
             ok = (run(["git", "add", "-A"], args.dry)
                   and run(["git", "commit", "-m", f"Gameweek update {stamp}"], args.dry)
                   and run(["git", "push"], args.dry))
-            if ok:
-                run(["./publish.sh"], args.dry)
-            else:
-                say("git failed, the site was not updated")
-                raise SystemExit(1)
+            if not ok:
+                fail("git failed, the site was not updated")
+            # Checked like every other step. This was the one place the return
+            # value was thrown away, so a failed publish logged "done" and the
+            # site quietly stayed a day behind.
+            if not run(["./publish.sh"], args.dry):
+                fail("publish.sh failed, the site was not updated")
 
-        say(f"done in {int(time.time() - started)}s")
+        elapsed = int(time.time() - started)
+        say(f"done in {elapsed}s")
+        if not args.dry:
+            write_status(True, f"completed in {elapsed}s")
 
     finally:
         if not args.dry and LOCK.exists():

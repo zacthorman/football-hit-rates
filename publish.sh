@@ -30,7 +30,25 @@ fi
 REMOTE="$(git remote get-url origin)"
 echo "Publishing to ${REMOTE}"
 
-python make_index.py
+# Pick an interpreter rather than assuming "python" exists.
+#
+# It does in your shell, because the virtualenv is activated. It does not
+# under launchd, which gives a job a bare environment with no profile and no
+# venv, so a scheduled run died here with "python: command not found" after
+# fourteen hours of fetching, having already committed and pushed. Prefer the
+# project's own venv, then python3, then python.
+if [ -x ".venv/bin/python" ]; then
+  PY=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="python3"
+elif command -v python >/dev/null 2>&1; then
+  PY="python"
+else
+  echo "No Python interpreter found. Tried .venv/bin/python, python3, python." >&2
+  exit 1
+fi
+
+"$PY" make_index.py
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

@@ -79,6 +79,25 @@ TOURNAMENTS = {
     "europa_league": 679,
 }
 
+def tournament_id_for(name: str) -> int | None:
+    """Competition name to id, forgiving about how it is written.
+
+    "LaLiga", "La Liga", "la-liga" and "LA LIGA" all mean the same competition
+    and all now resolve. Before this, "LaLiga" normalised to "laliga", the
+    table held "la_liga", and the whole league was skipped. It failed inside a
+    fourteen hour scheduled run whose output was being captured rather than
+    streamed, so the only trace was the word "Failed" with no reason attached.
+    """
+    if not name:
+        return None
+
+    squashed = "".join(c for c in name.lower() if c.isalnum())
+    for key, tournament_id in TOURNAMENTS.items():
+        if "".join(c for c in key if c.isalnum()) == squashed:
+            return tournament_id
+    return None
+
+
 _session = None
 
 

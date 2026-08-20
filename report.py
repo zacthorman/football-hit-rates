@@ -1143,8 +1143,9 @@ function priceRow(r) {
     // bound to nothing, and a bound of nothing prices everything at 20.0,
     // which is not caution, it is just noise wearing caution's clothes. A
     // fifty per cent haircut is already a severe one.
-    const low = Math.max(expected * 0.5, expected - 1.645 * se);
-    const highBand = Math.min(expected * 2, expected + 1.645 * se);
+    const relative = mean > 0 ? Math.min(0.5, 1.645 * se / mean) : 0.5;
+    const low = Math.max(expected * 0.5, expected * (1 - relative));
+    const highBand = Math.min(expected * 2, expected * (1 + relative));
 
     let p = probOver(r.line, expected, values);
     let pLow = probOver(r.line, low, values);
@@ -1326,10 +1327,20 @@ function playerAdjustment(stat, teamIndex) {
   const mean = values.reduce((s, v) => s + v, 0) / values.length;
   if (mean <= 0) return 1;
 
-  // Clipped to a third either way. The adjustment is a reasonable inference,
-  // not a measurement, and it should nudge a player line rather than move it
-  // somewhere the player has never been.
-  return Math.min(1.35, Math.max(0.7, proj[teamIndex] / mean));
+  // Only a guard against a divide-by-nothing, not a modelling choice.
+  //
+  // This used to clip to 0.7 and 1.35, on the reasoning that an adjustment
+  // should nudge a player line rather than move it a long way. That reasoning
+  // was wrong, and expensively so. Coventry average 15.8 shots in the
+  // Championship and are expected to manage 4.83 at the Emirates, which is a
+  // true adjustment of 0.31. Clipping it to 0.7 priced their forwards at more
+  // than double the shots they will actually get, and made a 3.00 shot line
+  // look like 1.52.
+  //
+  // A mismatch really is a big move. That is what a mismatch is. The team
+  // projection behind this already has its own sanity checks, so the wide
+  // bounds here exist only to stop a near-zero average producing nonsense.
+  return Math.min(2.5, Math.max(0.2, proj[teamIndex] / mean));
 }
 
 /* Minutes are the whole ballgame for a player line, and ignoring them was the
@@ -1381,11 +1392,16 @@ function pricePlayer(apps, line, over, adjustment) {
   const per90 = (totalValue / totalMinutes) * 90;
   const expected = per90 * (expectedMinutes / 90) * adjustment;
 
+  // The standard error is in the sample's units and the expectation may be
+  // nothing like the sample mean, so it is carried across as a proportion.
+  // Subtracting an absolute 0.6 from an expectation of 0.9 left almost nothing
+  // and priced a Coventry forward's shots at 20.0.
   const mean = totalValue / n;
   const variance = values.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1);
   const se = Math.sqrt(Math.max(variance, 1e-9) / n);
-  const low = Math.max(expected * 0.5, expected - 1.645 * se);
-  const high = Math.min(expected * 2, expected + 1.645 * se);
+  const relative = mean > 0 ? Math.min(0.5, 1.645 * se / mean) : 0.5;
+  const low = Math.max(expected * 0.5, expected * (1 - relative));
+  const high = Math.min(expected * 2, expected * (1 + relative));
 
   const p = over ? probOver(line, expected, values) : 1 - probOver(line, expected, values);
   const pLow = over ? probOver(line, low, values) : 1 - probOver(line, high, values);
@@ -2087,9 +2103,7 @@ function playerView() {
       const index = PLAYER_ROWS.push({ row, price }) - 1;
 
       return `<tr class="${strong ? "strong" : ""}">
-        <td class="player-name">${p.name}<span class="pos">${p.pos}</span>
-          ${p.missed ? `<span class="sub-line">${p.missed} match${p.missed === 1 ? "" : "es"} `
-            + `not played, excluded</span>` : ""}</td>
+        <td class="player-name">${p.name}<span class="pos">${p.pos}</span></td>
         <td class="num" data-label="Apps">${p.vals.length}</td>
         <td class="num" data-label="Avg">${p.avg.toFixed(1)}
           ${price.source === "model"

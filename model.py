@@ -198,11 +198,18 @@ def price(
     var = sum((x - mean) ** 2 for x in values) / (n - 1)
     se = math.sqrt(max(var, 1e-9) / n)
 
-    # Clipped to half and double. Ten matches of a noisy stat can produce a
-    # standard error big enough to drag the lower bound to nothing, and a bound
-    # of nothing prices everything at 20.0, which is noise dressed as caution.
-    low = max(expected * 0.5, expected - Z_95 * se)
-    high = min(expected * 2, expected + Z_95 * se)
+    # The standard error is measured on the sample, so it is in the sample's
+    # units, and the expectation may be nothing like the sample mean. A
+    # Coventry forward averaging 2.8 shots in the Championship is expected to
+    # manage 0.9 at the Emirates; subtracting an absolute 0.6 from 0.9 leaves
+    # almost nothing and priced the bet at 20.0.
+    #
+    # So the uncertainty is carried across as a proportion. Twenty per cent
+    # uncertainty about a rate is twenty per cent whatever the rate is
+    # afterwards scaled to.
+    relative = min(0.5, Z_95 * se / mean) if mean > 0 else 0.5
+    low = max(expected * 0.5, expected * (1 - relative))
+    high = min(expected * 2, expected * (1 + relative))
 
     if over:
         p = prob_over(line, expected, values)

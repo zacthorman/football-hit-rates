@@ -288,6 +288,36 @@ JavaScript, via `verify.py`: Python's `round(4.5)` is 4 and JavaScript's
 `Math.round(4.5)` is 5, so the two implementations picked different numbers of
 trials and quoted different prices. Exactly the drift that script exists for.
 
+## Player lines and the strength of the opponent
+
+A second round of the same bug. Coventry's Brandon Thomas-Asante was priced at
+1.52 for over 1.5 shots when the market was 3.00, which looks like enormous
+value and is not: Coventry are away at Arsenal and will barely get a shot off.
+
+The player adjustment was clipped to between 0.7 and 1.35, on the reasoning
+that an adjustment should nudge a line rather than move it a long way. That
+reasoning was simply wrong. Coventry average 15.8 shots in the Championship
+and are expected to manage **4.83** at the Emirates. The true adjustment is
+**0.31**, and clipping it to 0.7 priced their forwards at more than double the
+shots they will get. A mismatch really is a big move; that is what a mismatch
+is. The bounds are now wide enough to be only a divide-by-zero guard.
+
+That exposed a second fault underneath. The haircut behind `need` was an
+absolute standard error measured on the player's own sample and then
+subtracted from an adjusted expectation a third the size. Taking 0.6 off an
+expectation of 0.9 leaves almost nothing, and the bet priced at 20.0. The
+uncertainty is now carried across as a proportion, which is the only way it
+can be right when the expectation is scaled.
+
+Both fixes apply to team bets too, since they share the model.
+
+The direction is now right: Arsenal's players price short, Coventry's price
+long. The remaining gap is at team level rather than player level. The tier
+estimate says Coventry manage 4.83 shots at Arsenal; the market implies nearer
+7. If that team number is harsh then every Coventry player price is harsh in
+proportion, and the fix is more matches behind the tier estimate rather than
+anything in the player maths.
+
 ## Club colours
 
 Each fixture is drawn in the two clubs' own colours rather than a fixed blue

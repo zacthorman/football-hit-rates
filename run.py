@@ -195,15 +195,22 @@ def league_ratings_for(tournament_id: int | None, games: int) -> tuple[dict, dic
 
 
 def team_colour(team_id: int) -> str | None:
-    """A club's primary kit colour, or None if the endpoint does not say.
+    """A club's kit colour, or None if the club has no usable one.
 
     One cheap request per club, cached for a week. Kit colours change once a
     season at most.
+
+    Primary, then secondary, then text, taking the first with an actual hue.
+    SofaScore's primary is the shirt's dominant colour, and for Spurs, Leeds,
+    Brentford, Sunderland and Fulham that is white, which is no use as a chart
+    colour. Their secondary is the colour you would name if asked.
     """
     data = api.get_json(f"team/{team_id}", max_age_hours=168, verbose=False) or {}
     colours = (data.get("team") or data).get("teamColors") or {}
-    primary = colours.get("primary")
-    return primary if isinstance(primary, str) and primary.startswith("#") else None
+    valid = [c for c in (colours.get("primary"), colours.get("secondary"),
+                         colours.get("text"))
+             if isinstance(c, str) and c.startswith("#")]
+    return clubcolour.best_of(*valid)
 
 
 def fixture_colours(home_id: int, away_id: int) -> dict:

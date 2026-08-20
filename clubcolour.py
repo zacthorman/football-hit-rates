@@ -148,6 +148,35 @@ def cvd_separation(one: str, two: str) -> float:
 
 # ------------------------------------------------------------------ the work
 
+def has_hue(hex_colour: str | None) -> bool:
+    """Is there a colour here, or just black, white or grey?"""
+    if not hex_colour:
+        return False
+    try:
+        return to_oklch(hex_colour)[1] >= 0.04
+    except ValueError:
+        return False
+
+
+def best_of(*candidates: str | None) -> str | None:
+    """The first candidate with an actual hue in it.
+
+    SofaScore's `primary` is the shirt's dominant colour, which for a lot of
+    clubs is white: Spurs, Leeds, Brentford, Sunderland, Fulham. Taking primary
+    alone turned five Premier League sides into the same fallback violet.
+    Their `secondary` is the colour you would actually name if asked, so it is
+    tried next: Spurs navy, Leeds blue, Brentford red, Sunderland red.
+
+    Some clubs really are monochrome. Newcastle are black and white, Fulham
+    white and black, and for those every candidate fails and the fallback is
+    the right answer rather than a failure.
+    """
+    for candidate in candidates:
+        if has_hue(candidate):
+            return candidate
+    return None
+
+
 def legible(hex_colour: str, mode: str) -> str:
     """Move a kit colour into the band without changing what colour it is.
 
@@ -235,17 +264,17 @@ def separate(home: str, away: str, mode: str) -> str:
 def pair_for(home_hex: str | None, away_hex: str | None, mode: str) -> tuple[str, str]:
     """Two chart colours for one fixture, guaranteed readable.
 
-    Falls back to the report's own defaults when a club has no colour on file,
-    which is better than guessing.
+    A club with no usable kit colour gets the monochrome slot, home or away,
+    rather than whichever default happens to sit in that position. The first
+    version used the report's slot-1 blue for a colourless home side and
+    slot-2 orange for a colourless away side, which meant Newcastle were blue
+    at St James' Park and orange everywhere else. A club has to look the same
+    in every fixture or the colour is not telling you anything.
+
+    The home side keeps its colour and the away side gives ground, for the
+    same reason.
     """
-    defaults = ("#2a78d6", "#eb6834") if mode == "light" else ("#3987e5", "#d95926")
+    home = legible(home_hex, mode) if home_hex else MONOCHROME[mode]
+    away = legible(away_hex, mode) if away_hex else MONOCHROME[mode]
 
-    home = legible(home_hex, mode) if home_hex else defaults[0]
-    away = legible(away_hex, mode) if away_hex else defaults[1]
-
-    if home_hex and away_hex:
-        away = separate(home, away, mode)
-    elif not home_hex:
-        home = separate(away, defaults[0], mode)
-
-    return home, away
+    return home, separate(home, away, mode)

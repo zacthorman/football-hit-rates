@@ -26,6 +26,7 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
+import clubcolour
 import hitrates
 import report
 import sofascore_api as api
@@ -193,6 +194,39 @@ def league_ratings_for(tournament_id: int | None, games: int) -> tuple[dict, dic
     return _RATINGS_CACHE[tournament_id]
 
 
+def team_colour(team_id: int) -> str | None:
+    """A club's primary kit colour, or None if the endpoint does not say.
+
+    One cheap request per club, cached for a week. Kit colours change once a
+    season at most.
+    """
+    data = api.get_json(f"team/{team_id}", max_age_hours=168, verbose=False) or {}
+    colours = (data.get("team") or data).get("teamColors") or {}
+    primary = colours.get("primary")
+    return primary if isinstance(primary, str) and primary.startswith("#") else None
+
+
+def fixture_colours(home_id: int, away_id: int) -> dict:
+    """Chart colours for both clubs, in both modes.
+
+    Kit colours cannot be used raw: half of them fail contrast against one
+    background or the other, and a third of derbies are red against red. So
+    each is moved into a legible band and the pair is checked for separation,
+    including under red-green colour blindness. See clubcolour.py.
+    """
+    home_kit = team_colour(home_id)
+    away_kit = team_colour(away_id)
+
+    light = clubcolour.pair_for(home_kit, away_kit, "light")
+    dark = clubcolour.pair_for(home_kit, away_kit, "dark")
+
+    return {
+        "light": list(light),
+        "dark": list(dark),
+        "kits": [home_kit, away_kit],
+    }
+
+
 _TIER_CACHE: dict = {}
 
 # Which division sits directly below each one. Used to stack last season's
@@ -283,6 +317,10 @@ def build_fixture(
             {"name": home["name"], "side": "home"},
             {"name": away["name"], "side": "away"},
         ],
+        # Two chart colours derived from the clubs' actual kits. Worked out
+        # here rather than in the browser because it needs the kit colours
+        # from the API, and because the result is fixed for the fixture.
+        "colours": fixture_colours(home["id"], away["id"]),
         "records": records,
         "stats": names,
         "lines": lines,
@@ -545,6 +583,12 @@ def demo() -> Path:
                 })
         return out
 
+    # Real kit primaries, so the colour handling is exercised by the demo.
+    DEMO_KITS = {
+        "Espanyol": "#0072ce", "Levante UD": "#004b9b",
+        "Getafe": "#005999", "Rayo Vallecano": "#ffffff",
+    }
+
     SQUADS = {
         "Espanyol": ["Dmitrovic", "El Hilali", "Riedel", "Cabrera", "Exposito",
                      "Dolan", "R. Fernandez", "Pere Milla", "Urko Gonzalez", "Calatrava"],
@@ -581,6 +625,13 @@ def demo() -> Path:
                 "kickoff": 4102444800,   # far future, so the demo never hides
             },
             "teams": [{"name": home, "side": "home"}, {"name": away, "side": "away"}],
+            "colours": {
+                "light": list(clubcolour.pair_for(
+                    DEMO_KITS.get(home), DEMO_KITS.get(away), "light")),
+                "dark": list(clubcolour.pair_for(
+                    DEMO_KITS.get(home), DEMO_KITS.get(away), "dark")),
+                "kits": [DEMO_KITS.get(home), DEMO_KITS.get(away)],
+            },
             "records": matches,
             "stats": names,
             "lines": hitrates.suggest_lines(matches, names),

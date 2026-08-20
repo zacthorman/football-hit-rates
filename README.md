@@ -241,6 +241,42 @@ combinations of mean, line and sample spread, runs `model.py` over the same
 grid, and fails if they disagree by more than 1e-9. Run it after touching
 either one. Both were also checked against scipy.
 
+## Club colours
+
+Each fixture is drawn in the two clubs' own colours rather than a fixed blue
+and orange, so Newcastle against Liverpool looks different from Man City
+against Bournemouth.
+
+Kit colours cannot be used raw. Three things go wrong:
+
+- **Contrast.** Newcastle's black vanishes on a dark background, Norwich's
+  yellow on a light one, Wolves' gold on both.
+- **Clash.** Manchester United against Liverpool is red against red. Arsenal
+  against Forest, the same. You cannot tell whose line is whose.
+- **Grey.** A monochrome club reads as an axis rather than as data.
+
+So `clubcolour.py` treats the kit colour as a starting hue, not a final value.
+Working in OKLab, it moves each colour into a legible lightness band for the
+mode, floors its chroma so it does not read as grey, and then measures the
+pair's separation under normal vision and under both red-green colour
+blindnesses. If the two clubs are still too close, the away side is rotated
+away in hue until they separate, so at least one team keeps its real colour.
+Clubs with no usable hue get a slot from the validated palette.
+
+The thresholds are not invented: they are the ones `dataviz`'s palette
+validator enforces, and the output is checked against it. All 420 pairs from a
+fifteen-club test set, across both light and dark, pass every check.
+
+That test caught a real mistake. The first monochrome fallback was a slate
+blue I picked because it looked right, and the validator failed it on the
+chroma floor in both modes and on the lightness band in dark. Which is the
+whole argument for running the validator instead of trusting your eye.
+
+Colours are worked out at build time and shipped per fixture, then applied when
+the fixture changes and again on a theme change, since the light and dark
+values are separately chosen rather than one flipped. Reports built before this
+existed keep the old defaults.
+
 ## How the Need price is worked out
 
 `Fair` is what the record implies on its own. `Need` is the price to insist on

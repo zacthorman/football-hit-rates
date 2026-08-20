@@ -2067,7 +2067,34 @@ function fillPlayerStats() {
 
 /* --------------------------------------------------------------- fixtures */
 
+/* The two series colours come from the clubs' kits, worked out at build time
+   and shipped per fixture. Applied here rather than baked into the stylesheet
+   because they change with the fixture, and again on a theme change because
+   the light and dark values are separately chosen rather than one flipped.
+
+   Reports built before this existed have no colours block and simply keep the
+   stylesheet's defaults. */
+function applyTeamColours() {
+  const root = document.documentElement;
+  if (!DATA.colours) {
+    root.style.removeProperty("--team-1");
+    root.style.removeProperty("--team-2");
+    return;
+  }
+
+  const stamped = root.getAttribute("data-theme");
+  const dark = stamped
+    ? stamped === "dark"
+    : window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+  const pair = DATA.colours[dark ? "dark" : "light"] || DATA.colours.light;
+  if (!pair) return;
+  root.style.setProperty("--team-1", pair[0]);
+  root.style.setProperty("--team-2", pair[1]);
+}
+
 function applyFixture() {
+  applyTeamColours();
   SUGGESTED = {};
   for (const [key, bucket] of Object.entries(DATA.lines)) {
     SUGGESTED[key] = Object.assign({}, bucket);
@@ -2255,6 +2282,9 @@ document.getElementById("theme").addEventListener("click", () => {
   const now = document.documentElement.getAttribute("data-theme");
   document.documentElement.setAttribute(
     "data-theme", now === "dark" ? "light" : "dark");
+  applyTeamColours();
+  render();
+  if (tab === "players") playerView();
 });
 
 /* The report is a static snapshot, but the browser knows the time, so it can
@@ -2354,6 +2384,8 @@ function applyDeepLink() {
 }
 
 window.addEventListener("hashchange", applyDeepLink);
+window.matchMedia("(prefers-color-scheme: dark)")
+  .addEventListener("change", () => { applyTeamColours(); render(); });
 
 if (ALL.fixtures.length > 1) {
   fixtureSelect.addEventListener("change", () => {

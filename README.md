@@ -192,6 +192,45 @@ Kick-off times render in the reader's own timezone. The page ships unix
 timestamps and lets the device do it, because a 20:00 UTC kick-off is 21:00 in
 most of Europe and being an hour out is the sort of thing that loses a bet.
 
+## Checked against real bookmaker prices (`market_check.py`)
+
+    python market_check.py reports/premier-league-10-fixtures.html
+
+Forty-eight bet365 player prices are saved in `market_prices.json`. This
+reprices every one of them using the current model and reports how far off the
+market it is, broken down by stat.
+
+Every other test here checks the model against itself. `verify.py` checks the
+two implementations agree; `backtest.py` checks the predictions are calibrated
+against outcomes. Neither can catch the model being confidently wrong in a way
+a bookmaker would spot instantly.
+
+**It caught a real bug on its first run.** Shots on target and tackles were
+both about 20% too confident. The cause: SofaScore leaves a stat out entirely
+when a player records none of it. Adrien Truffert's shots on target came back
+as `1, -, 1, 1, -, 2, -, -` across eight matches, and reading the gaps as
+unknown rather than as zero gave 1.25 a game when the truth is 0.62. Every
+shots-on-target and tackles price in the tool was built on roughly double the
+real rate. Shots escaped it because zeros are recorded there, which is exactly
+why eyeballing shots had suggested everything was fine.
+
+| stat | before | after |
+|------|--------|-------|
+| Shots | -6.1% | -6.1% |
+| Shots on target | +21.7% | +3.2% |
+| Tackles | +16.0% | -4.7% |
+
+The fix is applied both at fetch time and at render time, so reports built
+before it was found are corrected by `rerender.py` without refetching.
+
+The bookmaker's margin is a guess and the answer moves with it, so the guess
+is not allowed to decide the verdict. Each stat is scored at 5%, 7% and 9%
+overround, and only a lean that survives all three counts as a bias. A
+difference that appears at 5% and vanishes at 9% is a statement about the
+assumption, not about the model.
+
+Run it after any change to the pricing. It exits non-zero on a real bias.
+
 ## Does it actually work? (`backtest.py`)
 
 The one question nothing inside the model can answer: when it says 85%, do

@@ -1369,10 +1369,28 @@ function playerAdjustment(stat, teamIndex) {
 
 const MIN_MINUTES = 45;      // below this it is a cameo, not an appearance
 
+/* A missing stat means zero, not "no data".
+
+   SofaScore leaves the key out when a player records none of something. Read
+   as unknown, that averages only the matches where he did do it: Truffert's
+   shots on target read 1.25 a game when the truth was 0.62. Every shots on
+   target and tackles price was built on roughly double the real number.
+
+   Reports built before this was found still have the gaps in their data, so
+   the fill happens here too rather than only at fetch time, and they are
+   corrected by a re-render without refetching anything. */
+const ZERO_FILL = new Set(["Shots", "Shots on target", "Goals", "Assists",
+                           "Tackles", "Fouls", "Fouled", "Saves"]);
+
 function appearances(played, stat) {
   return played
-    .map(g => ({ value: g.stats[stat], minutes: g.minutes || 0 }))
-    .filter(g => g.value !== undefined && g.value !== null && g.minutes >= MIN_MINUTES);
+    .filter(g => (g.minutes || 0) >= MIN_MINUTES)
+    .map(g => {
+      let value = g.stats[stat];
+      if ((value === undefined || value === null) && ZERO_FILL.has(stat)) value = 0;
+      return { value, minutes: g.minutes };
+    })
+    .filter(g => g.value !== undefined && g.value !== null);
 }
 
 function pricePlayer(apps, line, over, adjustment) {

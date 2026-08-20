@@ -1,0 +1,391 @@
+{
+ "captured": "2026-08-20",
+ "book": "bet365",
+ "note": "Over prices only, so the bookmaker's margin is still in them. See market_check.py for how that is handled.",
+ "prices": [
+  {
+   "fixture": "Bournemouth",
+   "player": "Cherki",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.2,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Haaland",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.05,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Doku",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.4,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Tavernier",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 2.0,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Evanilson",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.83,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "O'Reilly",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.72,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Haaland",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.1,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Truffert",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 5.0,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Tavernier",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 2.1,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Nunes",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.61,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "O'Reilly",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.5,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Adams",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.16,
+   "under": null
+  },
+  {
+   "fixture": "Bournemouth",
+   "player": "Truffert",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.16,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Eze",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.1,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Saka",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.22,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Havertz",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.2,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Simms",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 2.1,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Rudoni",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 3.0,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Thomas-Asante",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 3.0,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Eze",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.25,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Madueke",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.5,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Simms",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 2.37,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Eccles",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 3.75,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Hincapi\u00e9",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.66,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Zubimendi",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 2.37,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "Onyeka",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.22,
+   "under": null
+  },
+  {
+   "fixture": "Coventry",
+   "player": "van Ewijk",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.36,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Hinshelwood",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.5,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Mitoma",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.3,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "G\u00f3mez",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.36,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Watkins",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.14,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Barkley",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.9,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Hinshelwood",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.72,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Kad\u0131o\u011flu",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 2.75,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Watkins",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.36,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Barkley",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 2.2,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Wieffer",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.12,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "G\u00f3mez",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.2,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Cash",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.57,
+   "under": null
+  },
+  {
+   "fixture": "Aston Villa",
+   "player": "Maatsen",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.33,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Ouattara",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.53,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Thiago",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.22,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Richarlison",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.36,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Solanke",
+   "stat": "Shots",
+   "line": 1.5,
+   "over": 1.18,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Thiago",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.36,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Richarlison",
+   "stat": "Shots on target",
+   "line": 0.5,
+   "over": 1.44,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Yarmoliuk",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.2,
+   "under": null
+  },
+  {
+   "fixture": "Tottenham",
+   "player": "Bentancur",
+   "stat": "Tackles",
+   "line": 1.5,
+   "over": 1.53,
+   "under": null
+  }
+ ]
+}

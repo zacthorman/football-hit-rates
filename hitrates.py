@@ -413,6 +413,20 @@ def player_form(
             if not values:
                 continue
 
+            # A missing stat means zero, not "no data".
+            #
+            # SofaScore leaves the key out entirely when a player records none
+            # of something. Adrien Truffert's shots on target came back as
+            # 1, -, 1, 1, -, 2, -, - across eight matches. Reading the gaps as
+            # unknown and averaging only the four that were there gave 1.25 a
+            # game when the truth is 0.62, and every shots-on-target and
+            # tackles price in the tool was built on roughly double the real
+            # number. Shots escaped it because zeros are recorded there.
+            #
+            # He played, so whatever he did not do, he did none of.
+            for name in PLAYER_ZERO_FILL:
+                values.setdefault(name, 0.0)
+
             person = entry.get("player", {})
             records.append(
                 {

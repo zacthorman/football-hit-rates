@@ -91,23 +91,38 @@ def main() -> None:
     if not files:
         raise SystemExit("No reports found in reports/.")
 
+    # Newest first, purely for the de-duplication below. The listing order of
+    # the page is decided by kick-off time later, so this only affects which
+    # copy of a repeated fixture wins.
+    freshest = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
     now = datetime.now(tz=timezone.utc).timestamp()
 
     fixtures: list[dict] = []
     seen: set[tuple] = set()
     live_reports: set[str] = set()
+    stale: dict[str, int] = {}
 
-    for path in files:
+    for path in freshest:
         for fixture in read_fixtures(path):
             if fixture["kickoff"] > now:
                 live_reports.add(path.name)
             elif not args.keep_played:
                 continue
 
-            # The same match can appear in two reports, for instance when a
-            # league round and a one-off build overlap. Keep the first.
+            # The same match can appear in two reports: a one-off build of a
+            # club's fixtures and the league round both contain it. Keep the
+            # copy from the most recently built report.
+            #
+            # This used to keep whichever came first alphabetically, which
+            # meant "10-fixtures-manchester-city.html" from last week beat
+            # "premier-league-10-fixtures.html" built an hour ago. Every link
+            # for those fixtures pointed at the stale file, so new features
+            # appeared to be missing from a site that had them.
             key = (fixture["home"], fixture["away"], fixture["kickoff"])
             if key in seen:
+                stale.setdefault(path.name, 0)
+                stale[path.name] += 1
                 continue
             seen.add(key)
             fixtures.append(fixture)
@@ -136,6 +151,13 @@ def main() -> None:
     for competition in competitions:
         count = sum(1 for f in fixtures if f["competition"] == competition)
         print(f"  {competition}: {count}")
+
+    if stale:
+        print("\nSuperseded by a more recent build:")
+        for name, count in sorted(stale.items()):
+            print(f"  {name}: {count} fixture(s) also in a newer report")
+        print("  Those links point at the newer file. Delete the old reports")
+        print("  if you no longer want them: rm reports/<name>")
 
     dead = [p for p in files if p.name not in live_reports]
     if dead:

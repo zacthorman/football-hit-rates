@@ -52,7 +52,7 @@ def extract_js() -> str:
     """The maths functions out of report.py's JS, with no DOM in sight."""
     js = report.JS
     wanted = ["logGamma", "poissonCdf", "negBinCdf", "logChoose", "binomCdf",
-              "dispersion", "probOver", "wilsonLow"]
+              "dispersion", "predictiveRatio", "probOver", "wilsonLow"]
 
     out = []
     for name in wanted:
@@ -79,6 +79,7 @@ def run_js(cases: list[dict]) -> list[dict]:
 const cases = JSON.parse(process.argv[2]);
 const out = cases.map(c => ({
   probOver: probOver(c.line, c.mean, c.values),
+  probWide: probOver(c.line, c.mean, c.values, predictiveRatio(c.values, c.mean)),
   wilson: wilsonLow(c.hits, c.total),
 }));
 console.log(JSON.stringify(out));
@@ -123,12 +124,17 @@ def main() -> None:
         py_prob = model.prob_over(case["line"], case["mean"], case["values"])
         py_wilson = model.wilson_low(case["hits"], case["total"])
 
+        py_wide = model.prob_over(case["line"], case["mean"], case["values"],
+                                  ratio=model.predictive_ratio(case["values"], case["mean"]))
+        d_wide = abs(py_wide - js["probWide"])
+        worst_prob = max(worst_prob, d_wide)
+
         d_prob = abs(py_prob - js["probOver"])
         d_wilson = abs(py_wilson - js["wilson"])
         worst_prob = max(worst_prob, d_prob)
         worst_wilson = max(worst_wilson, d_wilson)
 
-        if d_prob > TOLERANCE or d_wilson > TOLERANCE:
+        if d_prob > TOLERANCE or d_wilson > TOLERANCE or d_wide > TOLERANCE:
             failures.append(
                 f"  mean={case['mean']} line={case['line']} sample={case['sample']}: "
                 f"python {py_prob:.12f} vs js {js['probOver']:.12f}"

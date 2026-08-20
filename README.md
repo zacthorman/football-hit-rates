@@ -302,12 +302,34 @@ and are expected to manage **4.83** at the Emirates. The true adjustment is
 shots they will get. A mismatch really is a big move; that is what a mismatch
 is. The bounds are now wide enough to be only a divide-by-zero guard.
 
-That exposed a second fault underneath. The haircut behind `need` was an
-absolute standard error measured on the player's own sample and then
-subtracted from an adjusted expectation a third the size. Taking 0.6 off an
-expectation of 0.9 leaves almost nothing, and the bet priced at 20.0. The
-uncertainty is now carried across as a proportion, which is the only way it
-can be right when the expectation is scaled.
+That exposed a second fault underneath, and then a third.
+
+The haircut behind `need` was an absolute standard error measured on the
+player's own sample and subtracted from an adjusted expectation a third the
+size. Taking 0.6 off an expectation of 0.9 leaves almost nothing, and the bet
+priced at 20.0.
+
+Fixing that proportionally was still wrong, because the whole mechanism was
+wrong. It stacked two uncertainties on top of each other: the match itself is
+random, which the count distribution already knows about, and then the mean
+was cut again for being an estimate. On Havertz's five-match sample the cut
+hit its 50% cap, halving his expectation, so a bet with a fair price of 1.43
+came out needing 2.84. Nobody would ever take that.
+
+`need` now widens the distribution instead of moving its centre, by the law of
+total variance:
+
+    var(total) = expected x dispersion  +  standard error squared
+
+Which is the correct way to be cautious about a small sample. It converges on
+the plain price as the sample grows, which is what should happen, and it stays
+honest when the sample is genuinely thin. Havertz goes from 2.84 to 1.50, and
+a three-match sample still shows a visible gap between fair and need.
+
+One subtlety: extra variance usually hurts a bet, but when the expectation
+sits below the line it helps, because a wider spread makes an unlikely total
+more reachable. `need` takes whichever of the two views is worse, so it is
+always a floor on the price you should accept.
 
 Both fixes apply to team bets too, since they share the model.
 

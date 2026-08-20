@@ -119,7 +119,46 @@ def dispersion(values: list[float], prior: float = DISPERSION_PRIOR) -> float:
     return 1 + weight * (var / m - 1)
 
 
-def prob_over(line: float, mean: float, values: list[float]) -> float:
+def predictive_ratio(values: list[float], expected: float) -> float:
+    """Dispersion including the fact that the expectation is itself estimated.
+
+    Law of total variance: the spread of what actually happens is the spread of
+    the process plus the spread of your estimate of its centre.
+
+        var(total) = expected * dispersion  +  standard error squared
+
+    This replaces the old approach, which took a pessimistic point estimate of
+    the mean and priced off that. Doing it that way stacked two uncertainties
+    on top of each other: the match is random, which the distribution already
+    knows, and then the mean was cut again on top. On a five-match sample it
+    halved the expectation, so a bet with a fair price of 1.43 came out needing
+    2.84, and no one would ever take it.
+
+    Widening the distribution rather than moving its centre is the correct way
+    to be cautious about a small sample. It converges on the plain price as the
+    sample grows, which is what should happen.
+    """
+    n = len(values)
+    if n < 3 or expected <= 0:
+        return dispersion(values)
+
+    mean = sum(values) / n
+    if mean <= 0:
+        return dispersion(values)
+
+    var = sum((x - mean) ** 2 for x in values) / (n - 1)
+    # The standard error is measured on the sample and must be carried onto the
+    # expectation proportionally, since the two can be very different: a
+    # Championship forward averaging 2.8 shots is expected to manage 0.9 at the
+    # Emirates.
+    se = math.sqrt(max(var, 1e-9) / n) * (expected / mean)
+
+    total_var = expected * dispersion(values) + se * se
+    return total_var / expected
+
+
+def prob_over(line: float, mean: float, values: list[float],
+              ratio: float | None = None) -> float:
     """P(count > line), choosing the distribution from the observed spread.
 
     A line of 1.5 asks for two or more, hence the floor: P(X > 1.5) is
@@ -143,7 +182,8 @@ def prob_over(line: float, mean: float, values: list[float]) -> float:
     if mean <= 0:
         return 0.0
     k = math.floor(line)
-    ratio = dispersion(values)
+    if ratio is None:
+        ratio = dispersion(values)
 
     if ratio > 1.05:
         size = mean / (ratio - 1)
@@ -198,27 +238,24 @@ def price(
     var = sum((x - mean) ** 2 for x in values) / (n - 1)
     se = math.sqrt(max(var, 1e-9) / n)
 
-    # The standard error is measured on the sample, so it is in the sample's
-    # units, and the expectation may be nothing like the sample mean. A
-    # Coventry forward averaging 2.8 shots in the Championship is expected to
-    # manage 0.9 at the Emirates; subtracting an absolute 0.6 from 0.9 leaves
-    # almost nothing and priced the bet at 20.0.
-    #
-    # So the uncertainty is carried across as a proportion. Twenty per cent
-    # uncertainty about a rate is twenty per cent whatever the rate is
-    # afterwards scaled to.
-    relative = min(0.5, Z_95 * se / mean) if mean > 0 else 0.5
-    low = max(expected * 0.5, expected * (1 - relative))
-    high = min(expected * 2, expected * (1 + relative))
+    # `fair` prices the match's own randomness. `need` prices that plus the
+    # fact that the expectation came from a handful of matches, by widening
+    # the distribution rather than moving its centre.
+    wide = predictive_ratio(values, expected)
 
     if over:
         p = prob_over(line, expected, values)
-        p_low = prob_over(line, low, values)
-        p_high = prob_over(line, high, values)
+        widened = prob_over(line, expected, values, ratio=wide)
     else:
         p = 1 - prob_over(line, expected, values)
-        p_low = 1 - prob_over(line, high, values)
-        p_high = 1 - prob_over(line, low, values)
+        widened = 1 - prob_over(line, expected, values, ratio=wide)
+
+    # Always the more pessimistic of the two. Extra variance usually hurts,
+    # but when the expectation sits below the line it helps: a wider spread
+    # makes an unlikely total more reachable. `need` is a floor on the price
+    # you should accept, so it takes whichever view is worse for the bet.
+    p_low = min(p, widened)
+    p_high = max(p, widened)
 
     # When the record's own lower bound sits above anything the model will
     # allow even at its most generous, the two disagree beyond either one's

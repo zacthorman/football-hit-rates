@@ -1097,10 +1097,20 @@ function dispersion(vals) {
    underdispersed count puts far too much weight below the line: for a player
    expected to take 2.6 shots it assumes a 7% chance of taking none, which for
    a starting winger does not happen, and every player price came out long. */
-function probOver(line, mean, vals) {
+function predictiveRatio(vals, expected) {
+  const n = vals.length;
+  if (n < 3 || expected <= 0) return dispersion(vals);
+  const mean = vals.reduce((s, v) => s + v, 0) / n;
+  if (mean <= 0) return dispersion(vals);
+  const v = vals.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1);
+  const se = Math.sqrt(Math.max(v, 1e-9) / n) * (expected / mean);
+  return (expected * dispersion(vals) + se * se) / expected;
+}
+
+function probOver(line, mean, vals, ratioIn) {
   if (mean <= 0) return 0;
   const k = Math.floor(line);
-  const ratio = dispersion(vals);
+  const ratio = ratioIn === undefined ? dispersion(vals) : ratioIn;
 
   if (ratio > 1.05) {
     const size = mean / (ratio - 1);
@@ -1143,13 +1153,13 @@ function priceRow(r) {
     // bound to nothing, and a bound of nothing prices everything at 20.0,
     // which is not caution, it is just noise wearing caution's clothes. A
     // fifty per cent haircut is already a severe one.
-    const relative = mean > 0 ? Math.min(0.5, 1.645 * se / mean) : 0.5;
-    const low = Math.max(expected * 0.5, expected * (1 - relative));
-    const highBand = Math.min(expected * 2, expected * (1 + relative));
-
+    // `need` widens the distribution to account for the expectation being
+    // estimated, rather than moving its centre. See predictiveRatio.
+    const wide = predictiveRatio(values, expected);
     let p = probOver(r.line, expected, values);
-    let pLow = probOver(r.line, low, values);
-    if (!r.over) { p = 1 - p; pLow = 1 - probOver(r.line, highBand, values); }
+    let widened = probOver(r.line, expected, values, wide);
+    if (!r.over) { p = 1 - p; widened = 1 - widened; }
+    const pLow = Math.min(p, widened);
 
     // Both ends of the interval on the expectation, so a contradiction can be
     // detected rather than priced. If the record's own lower bound sits above
@@ -1157,8 +1167,7 @@ function priceRow(r) {
     // the two is wrong and neither should be trusted. That happens when a
     // ratings fit produces something absurd, like an expectation of 0.03
     // first-half offsides for a team that gets one nearly every half.
-    const pHigh = r.over ? probOver(r.line, highBand, values)
-                         : 1 - probOver(r.line, low, values);
+    const pHigh = Math.max(p, widened);
 
     // A second, blunter sanity check on the expectation itself. An opponent
     // adjustment should move a team's average, that is its whole job, but it
@@ -1396,15 +1405,11 @@ function pricePlayer(apps, line, over, adjustment) {
   // nothing like the sample mean, so it is carried across as a proportion.
   // Subtracting an absolute 0.6 from an expectation of 0.9 left almost nothing
   // and priced a Coventry forward's shots at 20.0.
-  const mean = totalValue / n;
-  const variance = values.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1);
-  const se = Math.sqrt(Math.max(variance, 1e-9) / n);
-  const relative = mean > 0 ? Math.min(0.5, 1.645 * se / mean) : 0.5;
-  const low = Math.max(expected * 0.5, expected * (1 - relative));
-  const high = Math.min(expected * 2, expected * (1 + relative));
-
-  const p = over ? probOver(line, expected, values) : 1 - probOver(line, expected, values);
-  const pLow = over ? probOver(line, low, values) : 1 - probOver(line, high, values);
+  const wide = predictiveRatio(values, expected);
+  let p = probOver(line, expected, values);
+  let widened = probOver(line, expected, values, wide);
+  if (!over) { p = 1 - p; widened = 1 - widened; }
+  const pLow = Math.min(p, widened);
 
   return {
     p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),

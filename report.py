@@ -1166,7 +1166,7 @@ function scanLines(minSample) {
   let combos = 0;
   let skipped = 0;
 
-  ALL.fixtures.forEach((fx, fxIndex) => {
+  scanFixtures().forEach(([fx, fxIndex]) => {
     Object.keys(fx.lines || {}).forEach(per => {
       const lines = fx.lines[per] || {};
       (fx.stats[per] || []).forEach(name => {
@@ -1240,6 +1240,80 @@ function scanLines(minSample) {
   return { found, combos, skipped };
 }
 
+/* ----------------------------------------------------------- player prices
+
+   Same count model as the team bets, applied to one player's match-by-match
+   numbers. Shots, tackles and fouls are counts and behave like counts, so
+   there is no reason to price them any differently.
+
+   The one thing that has to be handled separately is the opponent. There is
+   no per-player rating, and fitting one from ten matches would be inventing
+   precision. What there is, is the team's own opponent adjustment for the
+   same stat: if Arsenal are expected to take 40% more shots than usual in
+   this fixture, it is reasonable that their forwards are too. So the player's
+   average is scaled by that ratio, clipped so a wild team projection cannot
+   drag a player somewhere silly.
+
+   Where the team has no projection, the player's raw average is used and the
+   price is marked "record only", exactly as for a team bet. */
+
+const PLAYER_STAT_TO_TEAM = {
+  "Shots": "Total shots",
+  "Shots on target": "Shots on target",
+  "Tackles": "Tackles",
+  "Fouls": "Fouls",
+  "Goals": "Goals",
+};
+
+function playerAdjustment(stat, teamIndex) {
+  const teamStat = PLAYER_STAT_TO_TEAM[stat];
+  if (!teamStat) return 1;
+
+  const proj = ((DATA.projection || {})["ALL"] || {})[teamStat]
+            || (DATA.tierProjection ? (DATA.tierProjection.stats || {})[teamStat] : null);
+  if (!proj || proj[teamIndex] === undefined) return 1;
+
+  const rows = filtered(DATA.records[teamIndex]);
+  const values = rows.map(r => (r.stats.ALL || {})[teamStat])
+                     .filter(v => v !== undefined && v !== null);
+  if (values.length < 3) return 1;
+
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  if (mean <= 0) return 1;
+
+  // Clipped to a third either way. The adjustment is a reasonable inference,
+  // not a measurement, and it should nudge a player line rather than move it
+  // somewhere the player has never been.
+  return Math.min(1.35, Math.max(0.7, proj[teamIndex] / mean));
+}
+
+function pricePlayer(values, line, over, adjustment) {
+  const n = values.length;
+  const hits = values.filter(v => (v > line) === over).length;
+  const raw = values.reduce((s, v) => s + v, 0) / n;
+
+  if (n < 3 || raw <= 0) {
+    const p = hits / n;
+    return { p, fair: fairOdds(p), need: fairOdds(wilsonLow(hits, n)),
+             expected: undefined, source: "record" };
+  }
+
+  const expected = raw * adjustment;
+  const variance = values.reduce((s, x) => s + (x - raw) * (x - raw), 0) / (n - 1);
+  const se = Math.sqrt(Math.max(variance, 1e-9) / n);
+  const low = Math.max(expected * 0.5, expected - 1.645 * se);
+  const high = Math.min(expected * 2, expected + 1.645 * se);
+
+  const p = over ? probOver(line, expected, values) : 1 - probOver(line, expected, values);
+  const pLow = over ? probOver(line, low, values) : 1 - probOver(line, high, values);
+
+  return {
+    p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),
+    expected, source: "model", hits, n,
+  };
+}
+
+
 /* ------------------------------------------------------------- best bets
 
    The matchup scan. A hit rate on its own only tells you what one team did
@@ -1260,7 +1334,25 @@ function scanLines(minSample) {
    refuses to let one side carry the other, because both halves must clear the
    bar individually before the pair is scored at all. */
 
-const MATCHUP_FLOOR = 0.65;   // each side must clear this on its own
+/* Each side must clear this on its own before a pairing is scored. The
+   default is 0.5: a team that has gone over in every one of its matches
+   against an opponent that concedes over half the time is a real pattern,
+   and demanding 65% from both halves threw a lot of those away. Adjustable
+   on the page, because how strict to be is a judgement rather than a fact. */
+let MATCHUP_FLOOR = 0.5;
+
+/* Whether the scans look at this fixture or the whole round. Per fixture by
+   default: when you are looking at Arsenal v Coventry you want that game's
+   bets, not a list where nine of the ten rows are other matches. */
+let scanScope = "fixture";
+
+function scanFixtures() {
+  if (scanScope === "fixture") {
+    const index = ALL.fixtures.indexOf(DATA);
+    return index >= 0 ? [[DATA, index]] : [];
+  }
+  return ALL.fixtures.map((fx, i) => [fx, i]);
+}
 
 /* The markets that actually exist. Injected from hitrates.py so there is one
    list, not two that drift apart.
@@ -1289,9 +1381,12 @@ function scanMatchups(minSample) {
   let combos = 0;
   let skipped = 0;
 
-  ALL.fixtures.forEach((fx, fxIndex) => {
+  scanFixtures().forEach(([fx, fxIndex]) => {
     const now = Date.now() / 1000;
-    if (!showPast && (fx.fixture.kickoff || 0) <= now) return;
+    // A single selected fixture is always scanned, even after kick-off: you
+    // chose it deliberately. Only the whole-round view hides played games.
+    if (scanScope !== "fixture" && !showPast
+        && (fx.fixture.kickoff || 0) <= now) return;
 
     Object.keys(fx.lines || {}).forEach(per => {
       const lines = fx.lines[per] || {};
@@ -1434,15 +1529,18 @@ function scanMatchups(minSample) {
 function bestBetsView() {
   const minSample = parseInt(document.getElementById("bmin").value, 10) || 4;
   const limit = parseInt(document.getElementById("btop").value, 10) || 10;
+  MATCHUP_FLOOR = Math.min(1, Math.max(0.3,
+    (parseInt(document.getElementById("bfloor").value, 10) || 50) / 100));
   let { found, combos, skipped } = scanMatchups(minSample);
 
   const periodName = p => (ALL.periods && ALL.periods[p]) || p;
   const target = document.getElementById("bestbets");
 
   if (!found.length) {
-    target.innerHTML = `<p class="empty">No matchup had both halves at
-      ${Math.round(MATCHUP_FLOOR * 100)}% or better on at least ${minSample}
-      matches each. Lower the minimum, or build with more games.</p>`;
+    target.innerHTML = `<p class="empty">No matchup in
+      ${scanScope === "fixture" ? "this fixture" : "this round"} had both halves
+      at ${Math.round(MATCHUP_FLOOR * 100)}% or better on at least ${minSample}
+      matches each. Lower "Min each side", or widen the scope.</p>`;
     window.__best = [];
     return;
   }
@@ -1592,7 +1690,8 @@ function bestBetsView() {
 }
 
 function rowKey(r) {
-  return [r.fixtureIndex, r.teamIndex, r.stat, r.period, r.line, r.over].join("|");
+  return [r.player || "", r.fixtureIndex, r.teamIndex,
+          r.stat, r.period, r.line, r.over].join("|");
 }
 
 function standoutView() {
@@ -1748,10 +1847,10 @@ function slipView() {
     const cls = total >= 65 ? "good" : total < 40 ? "poor" : "";
 
     return `<tr data-slip="${i}">
-      <td class="player-name">${r.stat}
-        <span class="pos">${(ALL.periods || {})[r.period] || r.period}</span>
-        <span class="sub-line">${r.team} &middot; ${r.over ? "Over" : "Under"} ${r.line}
-          &middot; ${r.fixture}</span></td>
+      <td class="player-name">${r.player ? `${r.player} ${r.stat.toLowerCase()}` : r.stat}
+        <span class="pos">${r.player ? "player" : (ALL.periods || {})[r.period] || r.period}</span>
+        <span class="sub-line">${r.player ? r.team : r.team} &middot;
+          ${r.over ? "Over" : "Under"} ${r.line} &middot; ${r.fixture}</span></td>
       <td class="num" data-label="Record">${r.k}/${r.n}</td>
       <td class="odds" data-label="Need">${fmtOdds((r.price || priceRow(r)).need)}</td>
       <td data-label="Your price">
@@ -1812,8 +1911,34 @@ function slipView() {
 
 /* ---------------------------------------------------------------- players */
 
+/* Every player row currently on screen, so the Add button can find its pick
+   by index rather than by re-deriving it from the DOM. */
+let PLAYER_ROWS = [];
+
+/* A player pick shaped like a team pick, so the slip does not need to know
+   the difference. `player` is the flag that distinguishes them where it
+   matters, which is only in how the line is described. */
+function playerRow(p, stat, line, teamIndex, price) {
+  return {
+    player: p.name,
+    stat, line, over: true,
+    period: "ALL",
+    k: p.hits, n: p.vals.length,
+    score: wilsonLow(p.hits, p.vals.length),
+    team: DATA.teams[teamIndex].name,
+    teamIndex,
+    fixture: `${DATA.fixture.home} v ${DATA.fixture.away}`,
+    fixtureIndex: ALL.fixtures.indexOf(DATA),
+    chance: binomTail(p.vals.length, p.hits),
+    forVals: p.vals,
+    vals: p.vals,
+    price,
+  };
+}
+
 function playerView() {
   if (!hasPlayers()) return;
+  PLAYER_ROWS = [];
 
   const stat = document.getElementById("pstat").value;
   const line = parseFloat(document.getElementById("pline").value) || 0;
@@ -1858,12 +1983,20 @@ function playerView() {
 
     const fmt = v => (Number.isInteger(v) ? v : v.toFixed(1));
 
+    const adjustment = playerAdjustment(stat, teamIndex);
+
     const body = built.map(p => {
       const fake = p.played.map(g => ({
         date: g.date, venue: g.venue, opponent: g.opponent,
         stats: { [stat]: g.stats[stat] },
       }));
       const strong = p.pct >= STRONG_HIGH || p.pct <= STRONG_LOW;
+
+      const price = pricePlayer(p.vals, line, true, adjustment);
+      const row = playerRow(p, stat, line, teamIndex, price);
+      const inSlip = SLIP.some(s => s.key === rowKey(row));
+      const index = PLAYER_ROWS.push({ row, price }) - 1;
+
       return `<tr class="${strong ? "strong" : ""}">
         <td class="player-name">${p.name}<span class="pos">${p.pos}</span></td>
         <td class="num" data-label="Apps">${p.vals.length}</td>
@@ -1880,6 +2013,17 @@ function playerView() {
             <span class="seq">${p.vals.map(fmt).join(", ")}</span>
           </div>
         </td>
+        <td class="odds" data-label="Fair">${fmtOdds(price.fair)}</td>
+        <td class="odds odds-min" data-label="Need">${fmtOdds(price.need)}
+          ${price.source === "model"
+            ? `<span class="src" title="Priced from an expected ${price.expected.toFixed(2)} ` +
+              `in this fixture: their ${p.avg.toFixed(2)} average, adjusted ` +
+              `${adjustment >= 1 ? "up" : "down"} by the team's matchup.">` +
+              `${price.expected.toFixed(1)}&nbsp;exp</span>`
+            : `<span class="src warnsrc">record only</span>`}
+        </td>
+        <td><button type="button" class="add-btn" data-padd="${index}"
+              data-in="${inSlip ? 1 : 0}">${inSlip ? "Added" : "Add"}</button></td>
       </tr>`;
     }).join("");
 
@@ -1887,6 +2031,8 @@ function playerView() {
       <div class="board"><table class="ptable">
         <thead><tr>
           <th>Player</th><th>Apps</th><th>Avg</th><th>${stat} over ${line}</th>
+          <th title="Price implied by the record and the model">Fair</th>
+          <th title="Price the evidence supports">Need</th><th></th>
         </tr></thead>
         <tbody>${body}</tbody>
       </table></div>
@@ -2067,6 +2213,15 @@ segment("games", v => {
   if (tab === "best") bestBetsView();
 });
 segment("border", () => bestBetsView());
+segment("scope2", v => {
+  scanScope = v;
+  bestBetsView();
+  standoutView();
+});
+document.getElementById("bfloor").addEventListener("input", () => {
+  clearTimeout(standoutTimer);
+  standoutTimer = setTimeout(bestBetsView, 140);
+});
 segment("tier", v => { tier = v; render(); if (tab === "players") playerView(); });
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
 segment("period", v => { period = v; render(); });
@@ -2256,6 +2411,22 @@ document.getElementById("include-mismatched").addEventListener("click", e => {
     clearTimeout(standoutTimer);
     standoutTimer = setTimeout(bestBetsView, 140);
   }));
+
+document.getElementById("players").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-padd]");
+  if (!btn) return;
+  const entry = PLAYER_ROWS[parseInt(btn.dataset.padd, 10)];
+  if (!entry) return;
+
+  const key = rowKey(entry.row);
+  const at = SLIP.findIndex(s => s.key === key);
+  if (at >= 0) SLIP.splice(at, 1);
+  else SLIP.push({ key, row: entry.row, price: 0 });
+
+  playerView();
+  slipView();
+  document.getElementById("slip-count").textContent = SLIP.length ? ` (${SLIP.length})` : "";
+});
 
 document.getElementById("bestbets").addEventListener("click", e => {
   const btn = e.target.closest("button[data-badd]");
@@ -2537,6 +2708,20 @@ def build_html(payload: dict) -> str:
       <span class="control-label">Per competition</span>
       <input class="num-input" id="btop" type="number" step="1" min="1" max="25" value="10"
              aria-label="How many per competition">
+    </div>
+    <div class="control-group">
+      <span class="control-label">Scope</span>
+      <div class="seg">
+        <button type="button" data-scope2="fixture" aria-pressed="true"
+                title="Only the fixture selected above">This fixture</button>
+        <button type="button" data-scope2="round" aria-pressed="false"
+                title="Every fixture in this report">Whole round</button>
+      </div>
+    </div>
+    <div class="control-group">
+      <span class="control-label">Min each side</span>
+      <input class="num-input" id="bfloor" type="number" step="5" min="30" max="100" value="50"
+             aria-label="Minimum hit rate on each side, per cent">
     </div>
     <div class="control-group">
       <span class="control-label">Order</span>

@@ -192,6 +192,55 @@ Kick-off times render in the reader's own timezone. The page ships unix
 timestamps and lets the device do it, because a 20:00 UTC kick-off is 21:00 in
 most of Europe and being an hour out is the sort of thing that loses a bet.
 
+## Does it actually work? (`backtest.py`)
+
+The one question nothing inside the model can answer: when it says 85%, do
+those bets land 85% of the time? If they land 70%, every price on the site is
+too short and the tool has been quietly lying to you.
+
+    python backtest.py --league "Premier League" --games 10
+    python backtest.py --leagues "Premier League,Championship" --csv bets.csv
+
+It replays past fixtures, rebuilds what the tool would have said the day
+before each one, settles every bet the Best bets scan would have produced, and
+buckets the predictions against the outcomes. It runs entirely from the cache
+and makes no requests, so it cannot get your IP blocked. Missing lookups are
+counted rather than fetched.
+
+**The bit that decides whether any of it means anything.** Every fixture is
+built with an as-of cutoff at its own kick-off, so the model can only see
+matches played earlier. Without that it reads the result of the match it is
+predicting. Measured on a synthetic league:
+
+| | bets | said | landed |
+|---|---|---|---|
+| with the cutoff | 511 | 81.4% | 85.1% |
+| without it | 825 | 79.6% | 90.1% |
+
+Ten points of pure fiction, and 60% more bets that only qualified because the
+future was visible. That is lookahead bias, and it is the standard way a
+backtest flatters itself into looking like a business.
+
+The backtest also answers a question worth asking honestly: does the opponent
+adjustment beat just using the raw hit rate? Both are scored side by side on
+the same bets with a Brier score. On the synthetic league the count model came
+out ahead, 0.1242 against 0.1274, and was near perfectly calibrated between
+82% and 97% where the raw hit rate was seven points overconfident. On real
+football it may not win, and that is worth knowing.
+
+## The model lives in two places
+
+`model.py` is the Python implementation, used by the backtest. The JavaScript
+inside `report.py` is the same maths again, because the page reprices bets in
+the browser when you drag a line. Two copies of one calculation will drift.
+
+    python verify.py
+
+pulls the functions straight out of `report.py`, runs them in node over 224
+combinations of mean, line and sample spread, runs `model.py` over the same
+grid, and fails if they disagree by more than 1e-9. Run it after touching
+either one. Both were also checked against scipy.
+
 ## How the Need price is worked out
 
 `Fair` is what the record implies on its own. `Need` is the price to insist on

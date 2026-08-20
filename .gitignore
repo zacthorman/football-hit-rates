@@ -22,3 +22,14 @@ live_matches.csv
 # files that rebuild from the cache in seconds.
 reports/
 index.html
+
+# The track record IS the point, so it is committed rather than ignored.
+# !picks.json
+
+# Scheduled-run bookkeeping. The log is machine-specific and the lock is
+# transient; update.json is config you may want to keep, so it is not ignored.
+update.log
+.last_run.json
+launchd.out.log
+launchd.err.log
+.update.lock

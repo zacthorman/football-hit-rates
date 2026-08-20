@@ -112,6 +112,7 @@ def collect_events(
     min_matches: int = 5,
     team_name: str = "",
     verbose: bool = True,
+    before: float | None = None,
 ) -> list[dict]:
     """Gather a team's finished matches, newest last.
 
@@ -148,6 +149,17 @@ def collect_events(
         if e.get("status", {}).get("type") == "finished" and not _is_friendly(e)
     ]
 
+    # The as-of cutoff. Everything at or after this timestamp is invisible.
+    #
+    # This exists for backtesting and it is the single thing that decides
+    # whether a backtest means anything. Predicting a March fixture using
+    # matches played in April is not prediction, it is reading the answer,
+    # and it produces a model that looks superb and cannot make money. The
+    # comparison is strictly less-than so the fixture being predicted is
+    # itself excluded.
+    if before is not None:
+        finished = [e for e in finished if e.get("startTimestamp", 0) < before]
+
     if tournament_id is None:
         return finished
 
@@ -183,6 +195,7 @@ def team_form(
     tournament_id: int | None = None,
     limit: int = 10,
     verbose: bool = True,
+    before: float | None = None,
 ) -> list[dict]:
     """Build one record per match for a team, newest last.
 
@@ -190,7 +203,7 @@ def team_form(
     played, where, and the score.
     """
     events = collect_events(
-        team_id, tournament_id, team_name=team_name, verbose=verbose
+        team_id, tournament_id, team_name=team_name, verbose=verbose, before=before
     )[-limit:]
 
     if verbose:
@@ -337,6 +350,7 @@ def player_form(
     limit: int = 10,
     verbose: bool = True,
     current_squad_only: bool = True,
+    before: float | None = None,
 ) -> list[dict]:
     """One record per player per match, for a team's recent matches.
 
@@ -345,7 +359,7 @@ def player_form(
     which keeps the venue and last-N filters working the same way.
     """
     events = collect_events(
-        team_id, tournament_id, team_name=team_name, verbose=verbose
+        team_id, tournament_id, team_name=team_name, verbose=verbose, before=before
     )[-limit:]
 
     if verbose:

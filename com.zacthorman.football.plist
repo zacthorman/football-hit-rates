@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs update.py every morning at 07:00 local time.
+
+  Install:
+      cp com.zacthorman.football.plist ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/com.zacthorman.football.plist
+
+  Check it is registered:
+      launchctl list | grep football
+
+  Run it now, without waiting for the morning:
+      launchctl start com.zacthorman.football
+
+  Stop it:
+      launchctl unload ~/Library/LaunchAgents/com.zacthorman.football.plist
+
+  Notes that matter:
+
+  ProgramArguments points at the virtualenv's python by absolute path. launchd
+  gives a job almost no environment: no shell profile, no PATH you recognise,
+  no activated virtualenv. A bare "python" here would either not be found or
+  would be the system one, which has no curl_cffi, and the job would die on
+  the first import every morning without you noticing.
+
+  StartCalendarInterval, not StartInterval. If the Mac is asleep at 07:00 the
+  job does not vanish, launchd runs it once on the next wake.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zacthorman.football</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zacthorman/Vaults/Cowork Base/03 Code Projects/Football stats/.venv/bin/python</string>
+        <string>/Users/zacthorman/Vaults/Cowork Base/03 Code Projects/Football stats/update.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zacthorman/Vaults/Cowork Base/03 Code Projects/Football stats</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zacthorman/Vaults/Cowork Base/03 Code Projects/Football stats/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/zacthorman/Vaults/Cowork Base/03 Code Projects/Football stats/launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- git push needs to find git and the credential helper. -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

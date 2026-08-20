@@ -1,0 +1,18 @@
+{
+  "leagues": [
+    "Premier League",
+    "Championship",
+    "LaLiga",
+    "Serie A",
+    "Bundesliga",
+    "Ligue 1"
+  ],
+  "games": 38,
+  "players": true,
+  "adjust": true,
+  "tiers": true,
+  "prune": true,
+  "push": true,
+  "delay_min": 3.0,
+  "delay_max": 6.0
+}

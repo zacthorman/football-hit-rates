@@ -14,6 +14,7 @@ Fixture lists and live scores do change, so those pass a max_age.
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from datetime import date
@@ -28,8 +29,42 @@ BASE = "https://www.sofascore.com/api/v1"
 
 CACHE_DIR = Path(__file__).parent / "cache"
 
-MIN_DELAY = 1.0
-MAX_DELAY = 2.0
+# Pause between real fetches. Cache hits do not sleep, so this only ever
+# applies to traffic that actually leaves the machine.
+#
+# Overridable from the environment so an unattended run can be politer than
+# an interactive one. A person sitting at the keyboard waiting for a report
+# will not tolerate four seconds a request; a 7am cron job does not care, and
+# the slower it goes the less it looks like something worth blocking.
+MIN_DELAY = float(os.environ.get("SOFA_DELAY_MIN", 1.0))
+MAX_DELAY = float(os.environ.get("SOFA_DELAY_MAX", 2.0))
+
+# Circuit breaker. If the site starts refusing, the worst thing to do is keep
+# asking for an hour: that turns a rate limit into a reputation problem. After
+# this many blocks in a row with nothing succeeding in between, everything
+# stops and says so.
+MAX_CONSECUTIVE_BLOCKS = int(os.environ.get("SOFA_MAX_BLOCKS", 5))
+_consecutive_blocks = 0
+
+
+def _reset_blocks() -> None:
+    """A success clears the count.
+
+    Without this, five refusals spread across an entire run would trip the
+    breaker even though the run was working fine in between them. Only an
+    unbroken streak means anything.
+    """
+    global _consecutive_blocks
+    _consecutive_blocks = 0
+
+
+class Blocked(RuntimeError):
+    """Raised when the site has refused repeatedly and we are backing off.
+
+    Deliberately fatal rather than a return value. A run that quietly carries
+    on after being blocked produces reports with holes in them that look
+    exactly like reports without holes.
+    """
 
 # Competition ids. Find more by opening a league page with DevTools on the
 # Network tab and reading the uniqueTournament id out of any request.
@@ -126,6 +161,7 @@ def get_json(
             cache_file.write_text(json.dumps(data))
             # Sleep only after a real network call. Cache hits return above,
             # so a fully cached run is instant.
+            _reset_blocks()
             time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
             return data
 
@@ -139,9 +175,20 @@ def get_json(
             return None
 
         if response.status_code in (403, 429):
+            global _consecutive_blocks
+            _consecutive_blocks += 1
+            if _consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS:
+                raise Blocked(
+                    f"{_consecutive_blocks} refusals in a row from SofaScore "
+                    f"({response.status_code}). Stopping rather than hammering "
+                    f"it. Wait a few hours and try again; if it persists, raise "
+                    f"SOFA_DELAY_MIN and SOFA_DELAY_MAX and rebuild fewer "
+                    f"leagues at a time. Everything already in cache/ still works."
+                )
             wait = (2**attempt) * 5
             if verbose:
-                print(f"    {response.status_code} on {path}, backing off {wait}s")
+                print(f"    {response.status_code} on {path}, backing off {wait}s "
+                      f"({_consecutive_blocks}/{MAX_CONSECUTIVE_BLOCKS} before stopping)")
             time.sleep(wait)
             continue
 

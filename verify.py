@@ -51,7 +51,8 @@ TOLERANCE = 1e-9
 def extract_js() -> str:
     """The maths functions out of report.py's JS, with no DOM in sight."""
     js = report.JS
-    wanted = ["logGamma", "poissonCdf", "negBinCdf", "probOver", "wilsonLow"]
+    wanted = ["logGamma", "poissonCdf", "negBinCdf", "logChoose", "binomCdf",
+              "dispersion", "probOver", "wilsonLow"]
 
     out = []
     for name in wanted:
@@ -66,7 +67,11 @@ def extract_js() -> str:
     if not constants:
         raise SystemExit("could not find LG_C in report.py's JS")
 
-    return constants.group(0) + "\n" + "\n".join(out)
+    prior = re.search(r"const DISPERSION_PRIOR = \d+;", js)
+    if not prior:
+        raise SystemExit("could not find DISPERSION_PRIOR in report.py's JS")
+
+    return constants.group(0) + "\n" + prior.group(0) + "\n" + "\n".join(out)
 
 
 def run_js(cases: list[dict]) -> list[dict]:

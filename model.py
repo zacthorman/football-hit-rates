@@ -28,6 +28,11 @@ MATCHUP_FLOOR = 0.65
 # One-sided 95%. Used to put a band on the estimated expectation.
 Z_95 = 1.645
 
+# How hard to pull a small sample's dispersion towards Poisson. Chosen so that
+# a six-match player sample reproduces the market's own price once the
+# bookmaker's margin is removed; see dispersion().
+DISPERSION_PRIOR = 8.0
+
 
 def wilson_low(hits: int, total: int, z: float = 1.96) -> float:
     """Lower bound of the Wilson interval for a proportion.
@@ -81,27 +86,80 @@ def neg_bin_cdf(k: int, mean: float, size: float) -> float:
     return min(1.0, total)
 
 
+def binom_cdf(k: int, n: int, p: float) -> float:
+    """P(X <= k) for a binomial. The narrow end of the count family."""
+    if k < 0:
+        return 0.0
+    if k >= n:
+        return 1.0
+    p = min(1.0, max(0.0, p))
+    return sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k + 1))
+
+
+def dispersion(values: list[float], prior: float = DISPERSION_PRIOR) -> float:
+    """Variance divided by mean, pulled towards 1 by how little data there is.
+
+    The ratio decides which distribution to use, and on a short sample it is
+    itself a noisy estimate. Six matches of a player's shots gave a raw ratio
+    of 0.46, which is far more certainty than six numbers can support, and
+    reading it literally priced a bet at 1.20 when the market was near 1.29.
+
+    So it is shrunk towards 1, which is Poisson, by n / (n + prior). With the
+    default prior of 8 that same sample gives 0.77 and a price of 1.29, which
+    is bet365's own price once their margin is taken off.
+    """
+    n = len(values)
+    if n < 3:
+        return 1.0
+    m = sum(values) / n
+    if m <= 0:
+        return 1.0
+    var = sum((x - m) ** 2 for x in values) / (n - 1)
+    weight = n / (n + prior)
+    return 1 + weight * (var / m - 1)
+
+
 def prob_over(line: float, mean: float, values: list[float]) -> float:
     """P(count > line), choosing the distribution from the observed spread.
 
     A line of 1.5 asks for two or more, hence the floor: P(X > 1.5) is
     1 - P(X <= 1).
+
+    Three distributions, chosen by whether the counts are more or less spread
+    out than a Poisson process would be:
+
+      variance > mean   negative binomial. Normal for team shots: a side either
+                        dominates or gets pinned back.
+      variance = mean   Poisson.
+      variance < mean   binomial. Normal for a regular starter's shots: he
+                        takes two or three most weeks and almost never none.
+
+    The third case is the one that was missing, and its absence was expensive.
+    Poisson on an underdispersed count puts far too much mass below the line.
+    For a player expected to take 2.6 shots it assumes a 7% chance of taking
+    none, which for a starting winger is simply not a thing that happens, and
+    every player price came out far too long as a result.
     """
     if mean <= 0:
         return 0.0
     k = math.floor(line)
+    ratio = dispersion(values)
 
-    n = len(values)
-    if n >= 3:
-        m = sum(values) / n
-        var = sum((x - m) ** 2 for x in values) / (n - 1)
-        # Overdispersed relative to Poisson: carry the sample's spread onto
-        # the projected mean rather than pretending the spread is not there,
-        # which would quote a price that is too short.
-        if var > m * 1.05 and m > 0:
-            size = (m * m) / (var - m)
-            if math.isfinite(size) and size > 0:
-                return 1 - neg_bin_cdf(k, mean, size)
+    if ratio > 1.05:
+        size = mean / (ratio - 1)
+        if math.isfinite(size) and size > 0:
+            return 1 - neg_bin_cdf(k, mean, size)
+
+    if ratio < 0.95:
+        p = 1 - ratio
+        # floor(x + 0.5), not round(). Python's round() uses banker's rounding
+        # so round(4.5) is 4, while JavaScript's Math.round(4.5) is 5. That one
+        # difference put the two implementations of this model on different
+        # numbers of trials and therefore different prices, which verify.py
+        # caught on the first run after this branch was added.
+        trials = max(2, math.floor(mean / p + 0.5))
+        if trials > k:
+            return 1 - binom_cdf(k, trials, mean / trials)
 
     return 1 - poisson_cdf(k, mean)
 

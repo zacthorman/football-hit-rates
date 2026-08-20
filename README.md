@@ -241,6 +241,53 @@ combinations of mean, line and sample spread, runs `model.py` over the same
 grid, and fails if they disagree by more than 1e-9. Run it after touching
 either one. Both were also checked against scipy.
 
+## Player lines: minutes, and the worst bug in the tool
+
+Saka over 1.5 shots was priced at `need 3.00`. bet365 were offering 1.22. Two
+separate faults, both mine.
+
+**Minutes were ignored.** His last eight records included a match he did not
+play in at all, one where he came on for nine minutes, and one where he was
+off at half time. The nil from the game he missed was counted as a losing bet.
+A bookmaker voids that: it is not a loss, it is not an event. Counting it
+dragged his record to 5/8 and his expectation to 1.9 shots.
+
+Now any match under 45 minutes is dropped, the rest are converted to a rate
+per 90, and that rate is multiplied by the minutes he is likely to play. Which
+is how the market prices it, and the only way a 45-minute cameo and a full 90
+can sit in the same average.
+
+**The distribution was wrong in one direction.** The model switched to a
+negative binomial when counts were more spread out than Poisson, but had
+nothing for the other case. A regular starter's shots are *less* spread out
+than Poisson: he takes two or three most weeks and almost never none. Poisson
+with a mean of 2.6 assumes a 7% chance of zero shots, which for a starting
+winger does not happen, and that misplaced weight below the line made every
+player price too long.
+
+There is now a binomial branch for the underdispersed case. And because the
+dispersion estimate is itself noisy on six matches, it is shrunk towards
+Poisson by `n / (n + 8)`.
+
+The result, on the same six appearances:
+
+| | fair |
+|---|---|
+| before | 1.75 |
+| minutes fixed, Poisson | 1.37 |
+| plus the binomial branch | **1.28** |
+| bet365, margin removed | ~1.29 |
+
+Worth reading the conclusion carefully. Fair is 1.28 and bet365 offer 1.22, so
+that bet is **not** worth taking: the price is shorter than the odds justify.
+The tool is not being timid, it is telling you the bookmaker has the edge on
+that one.
+
+Adding the binomial branch also caught a divergence between the Python and the
+JavaScript, via `verify.py`: Python's `round(4.5)` is 4 and JavaScript's
+`Math.round(4.5)` is 5, so the two implementations picked different numbers of
+trials and quoted different prices. Exactly the drift that script exists for.
+
 ## Club colours
 
 Each fixture is drawn in the two clubs' own colours rather than a fixed blue

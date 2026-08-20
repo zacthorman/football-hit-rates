@@ -1051,23 +1051,68 @@ function negBinCdf(k, mean, size) {
   return Math.min(1, sum);
 }
 
+function logChoose(n, k) {
+  return logGamma(n + 1) - logGamma(k + 1) - logGamma(n - k + 1);
+}
+
+function binomCdf(k, n, p) {
+  if (k < 0) return 0;
+  if (k >= n) return 1;
+  p = Math.min(1, Math.max(0, p));
+  let sum = 0;
+  for (let i = 0; i <= k; i++) {
+    sum += Math.exp(logChoose(n, i) + i * Math.log(p) + (n - i) * Math.log1p(-p));
+  }
+  return Math.min(1, sum);
+}
+
+/* Variance over mean, pulled towards 1 by how little data there is.
+
+   The ratio picks the distribution, and on a short sample it is itself a noisy
+   estimate. Six matches of a player's shots gave a raw ratio of 0.46, which is
+   more certainty than six numbers can support, and taking it literally priced
+   a bet at 1.20 when the market was near 1.29. Shrunk with a prior of 8 the
+   same sample gives 0.77, and a price of 1.29. */
+const DISPERSION_PRIOR = 8;
+
+function dispersion(vals) {
+  const n = vals.length;
+  if (n < 3) return 1;
+  const m = vals.reduce((s, v) => s + v, 0) / n;
+  if (m <= 0) return 1;
+  const v = vals.reduce((s, x) => s + (x - m) * (x - m), 0) / (n - 1);
+  return 1 + (n / (n + DISPERSION_PRIOR)) * (v / m - 1);
+}
+
 /* P(count > line) for a half-integer line. A line of 1.5 means 2 or more, so
-   the question is P(X <= 1), hence the floor. */
+   the question is P(X <= 1), hence the floor.
+
+   Three distributions, chosen by how spread out the counts actually are:
+   negative binomial when the variance beats the mean, which is normal for team
+   shots; Poisson when they match; binomial when the variance is smaller, which
+   is normal for a regular starter who takes two or three shots most weeks and
+   almost never none.
+
+   That third case was missing and its absence was expensive. Poisson on an
+   underdispersed count puts far too much weight below the line: for a player
+   expected to take 2.6 shots it assumes a 7% chance of taking none, which for
+   a starting winger does not happen, and every player price came out long. */
 function probOver(line, mean, vals) {
   if (mean <= 0) return 0;
   const k = Math.floor(line);
+  const ratio = dispersion(vals);
 
-  const n = vals.length;
-  if (n >= 3) {
-    const m = vals.reduce((s, v) => s + v, 0) / n;
-    const v = vals.reduce((s, x) => s + (x - m) * (x - m), 0) / (n - 1);
-    // Overdispersed: use the negative binomial, carrying the spread observed
-    // in the sample over onto the projected mean.
-    if (v > m * 1.05 && m > 0) {
-      const size = (m * m) / (v - m);
-      if (isFinite(size) && size > 0) return 1 - negBinCdf(k, mean, size);
-    }
+  if (ratio > 1.05) {
+    const size = mean / (ratio - 1);
+    if (isFinite(size) && size > 0) return 1 - negBinCdf(k, mean, size);
   }
+
+  if (ratio < 0.95) {
+    const p = 1 - ratio;
+    const trials = Math.max(2, Math.round(mean / p));
+    if (trials > k) return 1 - binomCdf(k, trials, mean / trials);
+  }
+
   return 1 - poissonCdf(k, mean);
 }
 
@@ -1287,19 +1332,57 @@ function playerAdjustment(stat, teamIndex) {
   return Math.min(1.35, Math.max(0.7, proj[teamIndex] / mean));
 }
 
-function pricePlayer(values, line, over, adjustment) {
-  const n = values.length;
-  const hits = values.filter(v => (v > line) === over).length;
-  const raw = values.reduce((s, v) => s + v, 0) / n;
+/* Minutes are the whole ballgame for a player line, and ignoring them was the
+   single worst bug in this tool.
 
-  if (n < 3 || raw <= 0) {
-    const p = hits / n;
+   Saka's last eight records included a match he did not play in at all, one
+   where he came on for nine minutes, and one where he was off at half time.
+   The nil from the game he missed was being counted as a losing bet. A
+   bookmaker voids that bet; it is not a loss, it is not an event. Counting it
+   dragged his record to 5/8 and his expectation to 1.9 shots, and "over 1.5
+   shots" came out needing 3.00 when bet365 were offering 1.22.
+
+   So: a record with no minutes is not an appearance and is discarded. What
+   remains is converted to a rate per 90 and multiplied by the minutes he is
+   expected to play, which is how the market prices it and the only way a
+   45-minute cameo and a full match can sit in the same average. */
+
+const MIN_MINUTES = 45;      // below this it is a cameo, not an appearance
+
+function appearances(played, stat) {
+  return played
+    .map(g => ({ value: g.stats[stat], minutes: g.minutes || 0 }))
+    .filter(g => g.value !== undefined && g.value !== null && g.minutes >= MIN_MINUTES);
+}
+
+function pricePlayer(apps, line, over, adjustment) {
+  const n = apps.length;
+  const values = apps.map(a => a.value);
+  const hits = values.filter(v => (v > line) === over).length;
+
+  if (n < 3) {
+    const p = n ? hits / n : 0;
     return { p, fair: fairOdds(p), need: fairOdds(wilsonLow(hits, n)),
-             expected: undefined, source: "record" };
+             expected: undefined, source: "record", hits, n };
   }
 
-  const expected = raw * adjustment;
-  const variance = values.reduce((s, x) => s + (x - raw) * (x - raw), 0) / (n - 1);
+  // Rate per 90, then scaled to the minutes he is likely to get. Median
+  // rather than mean minutes, so one early substitution does not decide it.
+  const totalMinutes = apps.reduce((s, a) => s + a.minutes, 0);
+  const totalValue = values.reduce((s, v) => s + v, 0);
+  if (totalMinutes <= 0 || totalValue <= 0) {
+    const p = hits / n;
+    return { p, fair: fairOdds(p), need: fairOdds(wilsonLow(hits, n)),
+             expected: undefined, source: "record", hits, n };
+  }
+
+  const sortedMinutes = apps.map(a => a.minutes).sort((x, y) => x - y);
+  const expectedMinutes = Math.min(90, sortedMinutes[Math.floor(n / 2)]);
+  const per90 = (totalValue / totalMinutes) * 90;
+  const expected = per90 * (expectedMinutes / 90) * adjustment;
+
+  const mean = totalValue / n;
+  const variance = values.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1);
   const se = Math.sqrt(Math.max(variance, 1e-9) / n);
   const low = Math.max(expected * 0.5, expected - 1.645 * se);
   const high = Math.min(expected * 2, expected + 1.645 * se);
@@ -1310,6 +1393,7 @@ function pricePlayer(values, line, over, adjustment) {
   return {
     p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),
     expected, source: "model", hits, n,
+    per90, expectedMinutes, minutes: totalMinutes,
   };
 }
 
@@ -1963,13 +2047,18 @@ function playerView() {
       </h2>`;
 
     const built = [...byPlayer.entries()].map(([name, played]) => {
-      const vals = played.map(g => g.stats[stat])
-                         .filter(v => v !== undefined && v !== null);
+      // Appearances, not records. A match he watched from the bench is not a
+      // losing bet, it is a void one, and counting it as a loss is what made
+      // every player price nonsense.
+      const apps = appearances(played, stat);
+      const vals = apps.map(a => a.value);
       if (vals.length < minApps) return null;
       const hits = vals.filter(v => v > line).length;
       const pct = Math.round((hits / vals.length) * 100);
       const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-      return { name, pos: played[0].position || "", played, vals, hits, pct, avg };
+      const missed = played.length - apps.length;
+      return { name, pos: played[0].position || "", played, apps, vals,
+               hits, pct, avg, missed };
     }).filter(Boolean);
 
     built.sort((a, b) => b.pct - a.pct || b.vals.length - a.vals.length);
@@ -1992,15 +2081,19 @@ function playerView() {
       }));
       const strong = p.pct >= STRONG_HIGH || p.pct <= STRONG_LOW;
 
-      const price = pricePlayer(p.vals, line, true, adjustment);
+      const price = pricePlayer(p.apps, line, true, adjustment);
       const row = playerRow(p, stat, line, teamIndex, price);
       const inSlip = SLIP.some(s => s.key === rowKey(row));
       const index = PLAYER_ROWS.push({ row, price }) - 1;
 
       return `<tr class="${strong ? "strong" : ""}">
-        <td class="player-name">${p.name}<span class="pos">${p.pos}</span></td>
+        <td class="player-name">${p.name}<span class="pos">${p.pos}</span>
+          ${p.missed ? `<span class="sub-line">${p.missed} match${p.missed === 1 ? "" : "es"} `
+            + `not played, excluded</span>` : ""}</td>
         <td class="num" data-label="Apps">${p.vals.length}</td>
-        <td class="num" data-label="Avg">${p.avg.toFixed(1)}</td>
+        <td class="num" data-label="Avg">${p.avg.toFixed(1)}
+          ${price.source === "model"
+            ? `<span class="pos">${price.per90.toFixed(1)}/90</span>` : ""}</td>
         <td>
           <div class="pcell">
             <div class="figure">
@@ -2016,9 +2109,10 @@ function playerView() {
         <td class="odds" data-label="Fair">${fmtOdds(price.fair)}</td>
         <td class="odds odds-min" data-label="Need">${fmtOdds(price.need)}
           ${price.source === "model"
-            ? `<span class="src" title="Priced from an expected ${price.expected.toFixed(2)} ` +
-              `in this fixture: their ${p.avg.toFixed(2)} average, adjusted ` +
-              `${adjustment >= 1 ? "up" : "down"} by the team's matchup.">` +
+            ? `<span class="src" title="${price.per90.toFixed(2)} per 90 across ` +
+              `${price.minutes} minutes in ${price.n} appearances, over ` +
+              `${price.expectedMinutes} expected minutes, then adjusted ` +
+              `${adjustment >= 1 ? "up" : "down"} for the matchup.">` +
               `${price.expected.toFixed(1)}&nbsp;exp</span>`
             : `<span class="src warnsrc">record only</span>`}
         </td>
@@ -2724,7 +2818,10 @@ def build_html(payload: dict) -> str:
   </div>
   <p class="note">
     Full match only: SofaScore does not publish player numbers by half.
-    Players who have left the club are excluded.
+    Players who have left the club are excluded, and so is any match where they
+    played under 45 minutes, because a bet on a player who does not appear is
+    void rather than lost. Prices come from a rate per 90 multiplied by the
+    minutes they are likely to get.
   </p>
   <div id="players"></div>
 </div>

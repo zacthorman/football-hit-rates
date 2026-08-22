@@ -202,76 +202,6 @@ def wilson(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
     return max(0.0, (centre - spread) / denom), min(1.0, (centre + spread) / denom)
 
 
-def effective_n(rows: list[dict]) -> float:
-    """How many independent observations these bets are really worth.
-
-    Bets from one fixture are not independent. When Rayo were dominated by
-    Alaves it drove their shots on target down, their second-half shots on
-    target down, and their first-half goal kicks up, all at once. Ten bets from
-    that match are closer to two or three pieces of evidence than ten, but the
-    plain Wilson interval counts them as ten and comes out far too confident.
-
-    The standard correction is the design effect from cluster sampling:
-
-        design effect = 1 + (average cluster size - 1) * intra-cluster correlation
-
-    and the effective sample size is the raw count divided by it. The
-    correlation is estimated from the data, by comparing how much outcomes vary
-    between fixtures against how much they vary overall. One fixture per bet
-    gives a design effect of 1 and changes nothing, which is the right
-    behaviour once the history is spread across many matches.
-    """
-    if len(rows) < 2:
-        return float(len(rows))
-
-    clusters: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        clusters[row["fixture"]].append(row)
-
-    if len(clusters) < 2:
-        # Everything from one match. No way to separate the fixture effect
-        # from the bet effect, so assume the worst: it is one observation.
-        return 1.0
-
-    sizes = [len(group) for group in clusters.values()]
-    mean_size = sum(sizes) / len(sizes)
-    if mean_size <= 1:
-        return float(len(rows))
-
-    overall = sum(1 for r in rows if r["won"]) / len(rows)
-    if overall in (0.0, 1.0):
-        # No variance to decompose. Fall back to counting fixtures, which is
-        # the conservative reading.
-        return float(len(clusters))
-
-    # Between-cluster variance against total variance. The ratio is the share
-    # of the outcome explained by which match a bet came from.
-    between = sum(
-        len(group) * (sum(1 for r in group if r["won"]) / len(group) - overall) ** 2
-        for group in clusters.values()
-    ) / len(rows)
-    total = overall * (1 - overall)
-    rho = min(1.0, max(0.0, between / total)) if total > 0 else 0.0
-
-    design = 1 + (mean_size - 1) * rho
-    return max(1.0, len(rows) / design)
-
-
-def clustered_wilson(hits: int, rows: list[dict]) -> tuple[float, float]:
-    """A Wilson interval that knows the bets came in clumps.
-
-    Same arithmetic as wilson(), but on the effective sample size rather than
-    the raw count, so a run of bets from one match widens the interval instead
-    of narrowing it.
-    """
-    n = len(rows)
-    if not n:
-        return 0.0, 1.0
-    eff = effective_n(rows)
-    scaled = int(round(hits * eff / n)) if n else 0
-    return wilson(scaled, max(1, int(round(eff))))
-
-
 def report_fixture(settled: list[dict]) -> None:
     by_fixture: dict[str, list[dict]] = defaultdict(list)
     for bet in settled:
@@ -303,14 +233,9 @@ def report_history(rows: list[dict]) -> None:
 
     total_said = sum(r["modelP"] for r in rows)
     total_won = sum(1 for r in rows if r["won"])
-    lo, hi = clustered_wilson(total_won, rows)
-    eff = effective_n(rows)
+    lo, hi = wilson(total_won, len(rows))
     print(f"\n  Said {total_said / len(rows):.1%}, landed {total_won / len(rows):.1%}"
           f"  (95% interval {lo:.0%} to {hi:.0%})")
-    if eff < len(rows) - 0.5:
-        print(f"  {len(rows)} bets from {len({r['fixture'] for r in rows})} "
-              f"fixtures is worth about {eff:.0f} independent observations,"
-              f" and the interval says so.")
 
     print(f"\n  {'stat':18} {'n':>4} {'said':>7} {'landed':>7} {'gap':>7}  "
           f"{'proj error':>11}  verdict")
@@ -328,17 +253,10 @@ def report_history(rows: list[dict]) -> None:
                   if r.get("projection_error") is not None]
         median_error = statistics.median(errors) if errors else 0.0
 
-        # Gate on effective sample, not raw count. Forty bets drawn from four
-        # matches is not forty observations, and letting it act like forty is
-        # exactly the overfitting this file exists to avoid.
-        group_eff = effective_n(group)
-        if group_eff < MIN_SAMPLE:
-            if len(group) >= MIN_SAMPLE:
-                verdict = f"{len(group)} but only {group_eff:.0f} effective"
-            else:
-                verdict = f"only {len(group)}, need {MIN_SAMPLE}"
+        if len(group) < MIN_SAMPLE:
+            verdict = f"only {len(group)}, need {MIN_SAMPLE}"
         else:
-            lo, hi = clustered_wilson(sum(1 for r in group if r["won"]), group)
+            lo, hi = wilson(sum(1 for r in group if r["won"]), len(group))
             if lo <= said <= hi:
                 verdict = "calibrated"
             elif abs(landed - said) < MATERIAL:

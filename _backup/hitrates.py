@@ -239,12 +239,6 @@ def team_form(
                 "id": event_id,
                 "date": _match_date(event),
                 "competition": event.get("tournament", {}).get("name", "?"),
-                # The competition id as well as its name, so a caller can tell which
-                # division a club actually plays in. A fixture's own tag describes the
-                # round, not the teams, and the two differ whenever a lower-division
-                # tie is listed under the senior competition.
-                "tournament_id": (event.get("tournament", {})
-                                  .get("uniqueTournament", {}).get("id")),
                 "opponent": opponent.get("shortName") or opponent.get("name", "?"),
                 "opponent_id": opponent.get("id"),
                 "venue": "home" if is_home else "away",
@@ -550,12 +544,6 @@ def _record_from_event(
         "id": event["id"],
         "date": _match_date(event),
         "competition": event.get("tournament", {}).get("name", "?"),
-        # The competition id as well as its name, so a caller can tell which
-        # division a club actually plays in. A fixture's own tag describes the
-        # round, not the teams, and the two differ whenever a lower-division
-        # tie is listed under the senior competition.
-        "tournament_id": (event.get("tournament", {})
-                          .get("uniqueTournament", {}).get("id")),
         "opponent": opponent.get("shortName") or opponent.get("name", "?"),
         "opponent_id": opponent.get("id"),
         "venue": "home" if is_home else "away",

@@ -256,44 +256,9 @@ def check_rating_pools() -> None:
     print("rating pools: pair test consistent, cup-tie bridges refused")
 
 
-def check_clustering() -> None:
-    """Bets from one fixture must not count as independent evidence.
-
-    Ten bets on one match are not ten observations: when a side is dominated
-    it drags their shots, their shots on target and their opponent's goal
-    kicks all the same way at once. Counting them as ten produces an interval
-    far too narrow, and MIN_SAMPLE fires long before the evidence justifies it.
-    """
-    import review
-
-    def rows(spec):
-        return [{"fixture": fx, "won": bool(w), "modelP": 0.75,
-                 "stat": "Corner kicks"}
-                for fx, results in spec.items() for w in results]
-
-    one = rows({"A": [1, 1, 1, 0, 0, 1, 1, 1, 0, 1]})
-    if review.effective_n(one) != 1.0:
-        print(f"clustering: 10 bets from one fixture counted as "
-              f"{review.effective_n(one)}, expected 1")
-        sys.exit(1)
-
-    spread = rows({f"F{i}": [i % 2] for i in range(10)})
-    if abs(review.effective_n(spread) - 10) > 0.01:
-        print("clustering: one bet per fixture was penalised and should not be")
-        sys.exit(1)
-
-    correlated = rows({"A": [1] * 5, "B": [0] * 5, "C": [1] * 5, "D": [0] * 5})
-    if review.effective_n(correlated) >= 5:
-        print("clustering: fixtures that landed all-or-nothing were not discounted")
-        sys.exit(1)
-
-    print("clustering: correlated bets discounted, independent ones untouched")
-
-
 def main() -> None:
     check_zero_fill()
     check_rating_pools()
-    check_clustering()
 
     if not shutil.which("node"):
         print("node is not installed, skipping the cross-check.")

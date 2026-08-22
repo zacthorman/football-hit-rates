@@ -1954,46 +1954,6 @@ function scorePick(r, price) {
   return { total, parts };
 }
 
-/* The combined-price panel, as its own function so it can be refreshed when a
-   price changes without rebuilding the table underneath it. */
-function comboPanel(priced) {
-  if (priced.length <= 1) return "";
-
-  const combined = priced.reduce((acc, s) => acc * s.price, 1);
-  // Multiply the supported probabilities, not the raw records, so a long
-  // shot leg is not flattered by a small sample that happened to be perfect.
-  const chance = priced.reduce(
-    (acc, s) => acc * Math.min(0.999, 1 / (s.row.price || priceRow(s.row)).need), 1);
-  const fair = 1 / chance;
-  const perLeg = Math.pow(fair / combined, 1 / priced.length);
-
-  return `<div class="caution">
-    <strong>Putting ${priced.length} of these together.</strong>
-    Combined price <strong>${fmtOdds(combined)}</strong>, against a fair price of
-    <strong>${fmtOdds(fair)}</strong> on the conservative estimates.
-    ${combined >= fair
-      ? "That clears, but only if the legs are genuinely independent, and they rarely are."
-      : `You would need each leg to be about <strong>${((perLeg - 1) * 100).toFixed(1)}%</strong>
-         better priced than it is for this to break even.`}
-    <br><br>
-    Worth knowing what multiples do. The bookmaker's margin compounds with every
-    leg: at a typical 5% per market, a treble carries about 16% against you and a
-    five-fold about 28%. Singles are where value survives. Accumulators are the
-    most profitable product in the shop, and not for the person buying them.
-  </div>`;
-}
-
-
-/* Refresh only the parts of the slip that depend on a typed price. Deliberately
-   never touches the inputs, so typing is never interrupted. */
-function updateSlipTotals() {
-  const holder = document.getElementById("slip-combo");
-  if (!holder) return;
-  const priced = SLIP.filter(s => s.price > 1);
-  holder.innerHTML = comboPanel(priced);
-}
-
-
 function slipView() {
   const el = document.getElementById("slip");
 
@@ -2035,9 +1995,34 @@ function slipView() {
 
   // What happens if you put them together.
   const priced = SLIP.filter(s => s.price > 1);
-  const combo = comboPanel(priced);
+  let combo = "";
 
-  el.innerHTML = `<div id="slip-combo">${combo}</div>
+  if (priced.length > 1) {
+    const combined = priced.reduce((acc, s) => acc * s.price, 1);
+    // Multiply the supported probabilities, not the raw records, so a long
+    // shot leg is not flattered by a small sample that happened to be perfect.
+    const chance = priced.reduce(
+      (acc, s) => acc * Math.min(0.999, 1 / (s.row.price || priceRow(s.row)).need), 1);
+    const fair = 1 / chance;
+    const perLeg = Math.pow(fair / combined, 1 / priced.length);
+
+    combo = `<div class="caution">
+      <strong>Putting ${priced.length} of these together.</strong>
+      Combined price <strong>${fmtOdds(combined)}</strong>, against a fair price of
+      <strong>${fmtOdds(fair)}</strong> on the conservative estimates.
+      ${combined >= fair
+        ? "That clears, but only if the legs are genuinely independent, and they rarely are."
+        : `You would need each leg to be about <strong>${((perLeg - 1) * 100).toFixed(1)}%</strong>
+           better priced than it is for this to break even.`}
+      <br><br>
+      Worth knowing what multiples do. The bookmaker's margin compounds with every
+      leg: at a typical 5% per market, a treble carries about 16% against you and a
+      five-fold about 28%. Singles are where value survives. Accumulators are the
+      most profitable product in the shop, and not for the person buying them.
+    </div>`;
+  }
+
+  el.innerHTML = `${combo}
     <div class="board"><table class="ptable">
       <thead><tr>
         <th>Selection</th><th>Record</th><th>Need</th>
@@ -2653,34 +2638,10 @@ document.getElementById("slip").addEventListener("click", e => {
 document.getElementById("slip").addEventListener("input", e => {
   const input = e.target.closest("input[data-slip-price]");
   if (!input) return;
-  const row = input.closest("tr");
-  const i = parseInt(row.dataset.slip, 10);
+  const i = parseInt(input.closest("tr").dataset.slip, 10);
   SLIP[i].price = parseFloat(input.value) || 0;
-
-  /* Update this row's score in place. It used to call slipView() on a timer,
-     which rebuilt the whole table with innerHTML -- and that destroys the very
-     input being typed into. The element is replaced by a fresh one, so focus,
-     cursor position and any digits typed in the meantime are lost. Typing
-     "2.50" got as far as "2" and then the field emptied itself, which reads
-     as the box simply refusing input.
-
-     Only the score and its breakdown depend on the price, so only those are
-     rewritten. Nothing touches the input, so typing is never interrupted. */
-  const { total, parts } = scorePick(SLIP[i].row, SLIP[i].price);
-  const score = row.querySelector(".score");
-  if (score) {
-    score.textContent = total;
-    score.className = "score " + (total >= 65 ? "good" : total < 40 ? "poor" : "");
-  }
-  const breakdown = row.querySelector(".breakdown");
-  if (breakdown) {
-    breakdown.innerHTML =
-      `<span>value ${parts.value}/45</span>` +
-      `<span>evidence ${parts.evidence}/25</span>` +
-      `<span>model ${parts.agreement}/15</span>` +
-      `<span>context ${parts.context}/15</span>`;
-  }
-  updateSlipTotals();
+  clearTimeout(window.__slipTimer);
+  window.__slipTimer = setTimeout(slipView, 200);
 });
 
 document.getElementById("smin").addEventListener("input", standoutSoon);

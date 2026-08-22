@@ -185,6 +185,33 @@ def check_rating_pools() -> None:
         print("rating pools: a normal same-division projection was lost")
         sys.exit(1)
 
+    # The case the first version of this fix missed. Ratings are fitted from
+    # every club in the division and each club's record spans all
+    # competitions, so a single cup tie between divisions creates a path. Bare
+    # connectivity called that comparable and let the bug straight through.
+    bridged = {t: [list(r) for r in [rs]][0][:] for t, rs in records.items()}
+    bridged[9] = list(records[9]) + [{
+        "id": 99999, "date": "2025-02-01", "competition": "FA Cup",
+        "opponent": "T1", "opponent_id": 1, "venue": "away",
+        "goals_for": 0, "goals_against": 3, "result": "L",
+        "stats": {"ALL": {"Goals": 0.0, "Corner kicks": 2.0}},
+        "against": {"ALL": {"Goals": 3.0, "Corner kicks": 9.0}},
+    }]
+    bridged[1] = list(records[1]) + [{
+        "id": 99999, "date": "2025-02-01", "competition": "FA Cup",
+        "opponent": "T9", "opponent_id": 9, "venue": "home",
+        "goals_for": 3, "goals_against": 0, "result": "W",
+        "stats": {"ALL": {"Goals": 3.0, "Corner kicks": 9.0}},
+        "against": {"ALL": {"Goals": 0.0, "Corner kicks": 2.0}},
+    }]
+    if len(hitrates.rating_pools(bridged)) != 2:
+        print("rating pools: one cup tie was enough to merge two divisions")
+        sys.exit(1)
+    if hitrates.project_fixture(
+            hitrates.league_ratings(bridged, names), 9, 1, names) != {}:
+        print("rating pools: projected across divisions joined by one cup tie")
+        sys.exit(1)
+
     single = build(list(range(1, 13)), 2.5, 5.0, "Premier League",
                    {t: 0.7 + 0.05 * t for t in range(1, 13)})
     solo = hitrates.league_ratings(single, names)
@@ -202,7 +229,7 @@ def check_rating_pools() -> None:
                     print(f"rating pools: non-positive projection {stat}={pair}")
                     sys.exit(1)
 
-    print("rating pools: disconnected leagues refused, connected ones intact")
+    print("rating pools: thin links refused (incl. cup ties), real leagues intact")
 
 
 def main() -> None:

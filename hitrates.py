@@ -868,28 +868,47 @@ MIN_RATED_MATCHES = 4
 PROJECTION_CEILING = 3.0
 PROJECTION_FLOOR = 0.25
 
+# How many shared opponents two teams need before their ratings may be
+# compared. Within a division every pair clears this comfortably: the Premier
+# League fixtures checked all shared 18. A cross-division pairing joined only
+# by a cup tie scores 0 or 1, which is the case this exists to reject.
+MIN_POOL_LINKS = 4
 
-def rating_pools(records_by_team: dict[int, list[dict]]) -> list[set[int]]:
+
+def rating_pools(records_by_team: dict[int, list[dict]],
+                 min_links: int = MIN_POOL_LINKS) -> list[set[int]]:
     """Split teams into groups that can actually be compared with each other.
 
-    The multiplicative fit only means anything within a set of teams connected
-    by shared opponents. Two teams that have never played anyone in common sit
-    on separate scales, and nothing in the arithmetic knows that.
+    The multiplicative fit only means anything within a set of teams measured
+    against a common standard. Two teams whose matches never overlap sit on
+    separate scales, and nothing in the arithmetic knows that.
 
-    This is not a hypothetical. A Premier League report containing Hull City v
-    Manchester United projected Hull to score exactly 0.00 goals. Hull's 38
-    matches were 33 Championship, 3 playoffs and 2 FA Cup, with no opponent in
-    common with United. Because attack is normalised to mean 1.0 across the
-    whole pool, the Championship sides were pushed to the bottom of a scale
-    calibrated on Premier League scoring, and Hull landed on the floor of it.
-    The model was not measuring that Hull are worse. It was measuring that
-    Championship matches contain fewer goals and blaming the teams for it.
+    The first version of this asked only whether *a* path existed between two
+    teams, using a plain union-find. That was too weak, and it let the exact
+    bug it was written for straight through. Ratings are fitted from all 20
+    clubs in the division, and each club's record covers every competition it
+    played, cup ties included. One FA Cup tie is a path. So Hull City, whose
+    league season was entirely in the Championship, was joined to the Premier
+    League component through a single cup match and waved through as
+    comparable. It projected Ipswich for 6.41 corners against Sunderland's
+    3.33 off zero shared opponents, and put Manchester United *below* Hull.
 
-    MIN_RATED_MATCHES does not catch this, because the count is fine: Hull had
-    38 matches. What is missing is a path through the opponent graph, so that
-    is what gets measured here, with a union-find over who has played whom.
+    Existing and being measurable are different things. A single shared
+    fixture is a path but it is nowhere near enough to calibrate one division
+    against another, so what matters is the *weight* of the connection: two
+    teams belong in one pool only if they are joined by at least `min_links`
+    distinct shared opponents, directly or through other teams that clear the
+    same bar. Edges thinner than that are treated as coincidence, which for a
+    cup tie between divisions is exactly what they are.
     """
-    parent = {t: t for t in records_by_team}
+    ids = list(records_by_team)
+    opponents = {
+        t: {r.get("opponent_id") for r in records_by_team[t]
+            if r.get("opponent_id") is not None}
+        for t in ids
+    }
+
+    parent = {t: t for t in ids}
 
     def find(x):
         while parent[x] != x:
@@ -902,14 +921,20 @@ def rating_pools(records_by_team: dict[int, list[dict]]) -> list[set[int]]:
         if ra != rb:
             parent[ra] = rb
 
-    for team, records in records_by_team.items():
-        for r in records:
-            opp = r.get("opponent_id")
-            if opp in parent:
-                union(team, opp)
+    # Only join two teams when the overlap in who they have played is thick
+    # enough to calibrate one against the other. Counting a direct meeting as
+    # one link on top of the shared opponents, since playing each other is
+    # itself evidence, just not much of it on its own.
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            links = len(opponents[a] & opponents[b])
+            if b in opponents[a] or a in opponents[b]:
+                links += 1
+            if links >= min_links:
+                union(a, b)
 
     pools: dict[int, set[int]] = {}
-    for t in records_by_team:
+    for t in ids:
         pools.setdefault(find(t), set()).add(t)
     return sorted(pools.values(), key=len, reverse=True)
 
@@ -920,7 +945,6 @@ def pool_of(pools: list[set[int]], team_id: int) -> int | None:
         if team_id in pool:
             return i
     return None
-
 
 
 def league_ratings(

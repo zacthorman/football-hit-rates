@@ -192,6 +192,58 @@ Kick-off times render in the reader's own timezone. The page ships unix
 timestamps and lets the device do it, because a 20:00 UTC kick-off is 21:00 in
 most of Europe and being an hour out is the sort of thing that loses a bet.
 
+## Reviewing itself after the games (`review.py`)
+
+    python review.py reports/laliga-11-fixtures.html
+    python review.py reports/*.html --history
+    python review.py --history
+
+For every fixture in a report that has now been played, this takes the bets the
+Best bets tab would have shown, settles them against what actually happened,
+and says why each one landed or missed. Then it appends everything to
+`review_history.json`, so the picture builds week after week.
+
+The per-bet verdict separates a good call from a lucky one:
+
+```
+Rayo Vallecano v Deportivo Alaves   10/10 landed
+  OK   Alaves over 6.5 goal kicks
+       said 90%  got 11   projection was right (10.3 expected, 11 actual)
+  OK   Rayo over 1.5 corner kicks 1st
+       said 71%  got 2    landed by 0.5, tighter than the price implied
+```
+
+Both won. Only the first was actually predicted.
+
+### Why it does not retune itself
+
+The obvious next step is to let it adjust the model automatically. That would
+be a mistake.
+
+A gameweek gives maybe twenty settled bets. Fitting anything to twenty
+observations produces a model that explains last Saturday beautifully and knows
+nothing about next Saturday. Do it every week and the model chases noise in a
+circle, each week undoing the last. The failure mode is the worst kind: the
+numbers keep looking better while the predictions get worse.
+
+So it reports evidence and stops. Three rules:
+
+1. **Nothing below 40 settled bets for a stat.** Under that a lean cannot be
+   told from a run of luck. The output says `only 8, need 40` and moves on.
+2. **Every figure carries an interval.** If it spans the claim, there is
+   nothing there.
+3. **Any suggested correction is fitted on the older half of the history and
+   scored on the newer half.** If it does not survive out of sample it is
+   reported as noise and explicitly not applied.
+
+Only global corrections are ever considered: a per-stat calibration shift, or
+the dispersion prior. Never a per-team or per-player adjustment, because there
+is never enough data for one and it is the fastest route to a model fitted to
+individual results.
+
+Most weeks the honest answer is "nothing to change", and the script says so
+rather than inventing work.
+
 ## Checked against real bookmaker prices (`market_check.py`)
 
     python market_check.py reports/premier-league-10-fixtures.html

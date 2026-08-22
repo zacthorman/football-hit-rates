@@ -317,6 +317,25 @@ PLAYER_STAT_NAMES = {
     "saves": "Saves",
 }
 
+# Stats where a missing key means the player recorded none of it, not that the
+# figure is unavailable. Only counting stats belong here: a missing "Rating" or
+# "Minutes" really is absent data, and filling those with zero would be a lie.
+#
+# This list is the whole fix for the doubling described in player_form(). It has
+# to be a module-level constant rather than a literal inside the loop because
+# report.py needs the same set at render time, and the two drifting apart is
+# what would let the bug back in.
+PLAYER_ZERO_FILL = frozenset({
+    "Shots",
+    "Shots on target",
+    "Goals",
+    "Assists",
+    "Tackles",
+    "Fouls",
+    "Fouled",
+    "Saves",
+})
+
 # Shown at the top of the stat picker, when present.
 PLAYER_STAT_ORDER = [
     "Shots",
@@ -843,6 +862,66 @@ def tier_projection(
 # published, and project_fixture then omits the stat entirely.
 MIN_RATED_MATCHES = 4
 
+# A projection this far from the league average is a broken fit, not a bold
+# call. Real team-level variation in these counts lives well inside 3x, so
+# anything outside is the multipliers running away rather than football.
+PROJECTION_CEILING = 3.0
+PROJECTION_FLOOR = 0.25
+
+
+def rating_pools(records_by_team: dict[int, list[dict]]) -> list[set[int]]:
+    """Split teams into groups that can actually be compared with each other.
+
+    The multiplicative fit only means anything within a set of teams connected
+    by shared opponents. Two teams that have never played anyone in common sit
+    on separate scales, and nothing in the arithmetic knows that.
+
+    This is not a hypothetical. A Premier League report containing Hull City v
+    Manchester United projected Hull to score exactly 0.00 goals. Hull's 38
+    matches were 33 Championship, 3 playoffs and 2 FA Cup, with no opponent in
+    common with United. Because attack is normalised to mean 1.0 across the
+    whole pool, the Championship sides were pushed to the bottom of a scale
+    calibrated on Premier League scoring, and Hull landed on the floor of it.
+    The model was not measuring that Hull are worse. It was measuring that
+    Championship matches contain fewer goals and blaming the teams for it.
+
+    MIN_RATED_MATCHES does not catch this, because the count is fine: Hull had
+    38 matches. What is missing is a path through the opponent graph, so that
+    is what gets measured here, with a union-find over who has played whom.
+    """
+    parent = {t: t for t in records_by_team}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for team, records in records_by_team.items():
+        for r in records:
+            opp = r.get("opponent_id")
+            if opp in parent:
+                union(team, opp)
+
+    pools: dict[int, set[int]] = {}
+    for t in records_by_team:
+        pools.setdefault(find(t), set()).add(t)
+    return sorted(pools.values(), key=len, reverse=True)
+
+
+def pool_of(pools: list[set[int]], team_id: int) -> int | None:
+    """Which comparable group a team belongs to, or None if it is unknown."""
+    for i, pool in enumerate(pools):
+        if team_id in pool:
+            return i
+    return None
+
+
 
 def league_ratings(
     records_by_team: dict[int, list[dict]],
@@ -904,6 +983,13 @@ def league_ratings(
     attack = {t: {p: {} for p in names} for t in ids}
     defence = {t: {p: {} for p in names} for t in ids}
 
+    # Teams that share no opponents cannot be put on one scale. Normalising
+    # each connected group separately keeps a Championship side's rating
+    # relative to the Championship, instead of to a Premier League average it
+    # was never measured against.
+    pools = rating_pools(records_by_team)
+    pool_index = {t: i for i, pool in enumerate(pools) for t in pool}
+
     for period, period_names in names.items():
         league = ratings["average"].get(period, {})
 
@@ -941,12 +1027,25 @@ def league_ratings(
 
                 # Normalise so the average team sits at 1.0, otherwise attack
                 # and defence can drift together and mean nothing.
-                a_mean = sum(new_att.values()) / len(new_att)
-                d_mean = sum(new_def.values()) / len(new_def)
-                if a_mean > 0:
-                    new_att = {t: v / a_mean for t, v in new_att.items()}
-                if d_mean > 0:
-                    new_def = {t: v / d_mean for t, v in new_def.items()}
+                #
+                # Done per connected pool, not across the whole set. A global
+                # mean mixes divisions that have never played each other and
+                # silently rescales one against the other; that is what drove
+                # Hull City to a projected 0.00 goals against Manchester
+                # United. Within a pool the mean is meaningful, because every
+                # team in it is joined by a chain of real fixtures.
+                for pool in pools:
+                    members = [t for t in pool if t in new_att]
+                    if not members:
+                        continue
+                    a_mean = sum(new_att[t] for t in members) / len(members)
+                    d_mean = sum(new_def[t] for t in members) / len(members)
+                    if a_mean > 0:
+                        for t in members:
+                            new_att[t] = new_att[t] / a_mean
+                    if d_mean > 0:
+                        for t in members:
+                            new_def[t] = new_def[t] / d_mean
 
                 shift = max(
                     max(abs(new_att[t] - att[t]) for t in ids),
@@ -971,6 +1070,9 @@ def league_ratings(
     ratings["defence"] = {str(t): defence[t] for t in ids}
     ratings["samples"] = {str(t): samples[t] for t in ids}
     ratings["minMatches"] = min_matches
+
+    ratings["pools"] = {str(t): pool_index[t] for t in ids}
+    ratings["poolSizes"] = [len(pool) for pool in pools]
 
     ratings["teams"] = len(records_by_team)
     return ratings
@@ -1001,6 +1103,17 @@ def project_fixture(
     """
     out: dict = {}
 
+    # Refuse outright if the two sides were never on the same scale. A rating
+    # is a multiplier relative to a pool's own average, so comparing one
+    # across pools is a category error, not merely a noisy estimate. Better no
+    # projection than a confident wrong one: the report already knows how to
+    # fall back to the raw record and say so.
+    pools = ratings.get("pools") or {}
+    home_pool = pools.get(str(home_id))
+    away_pool = pools.get(str(away_id))
+    if home_pool is not None and away_pool is not None and home_pool != away_pool:
+        return {}
+
     home_att = ratings.get("attack", {}).get(str(home_id), {})
     away_att = ratings.get("attack", {}).get(str(away_id), {})
     home_def = ratings.get("defence", {}).get(str(home_id), {})
@@ -1022,9 +1135,27 @@ def project_fixture(
             if stat not in home_base or stat not in away_base:
                 continue
 
+            home_expected = home_base[stat] * ha * ad
+            away_expected = away_base[stat] * aa * hd
+
+            # A failed fit does not announce itself; it produces a number.
+            # These two checks catch the shapes it produces. An expectation at
+            # or below zero is impossible for a count and always means the
+            # ratings collapsed. An expectation many times the league average,
+            # or a tiny fraction of it, means the multipliers ran away rather
+            # than that a team is genuinely that extreme.
+            if home_expected <= 0 or away_expected <= 0:
+                continue
+            base_all = ratings.get("average", {}).get(period, {}).get(stat)
+            if base_all and base_all > 0:
+                worst = max(home_expected, away_expected) / base_all
+                best = min(home_expected, away_expected) / base_all
+                if worst > PROJECTION_CEILING or best < PROJECTION_FLOOR:
+                    continue
+
             bucket[stat] = [
-                round(home_base[stat] * ha * ad, 2),
-                round(away_base[stat] * aa * hd, 2),
+                round(home_expected, 2),
+                round(away_expected, 2),
             ]
 
         if bucket:

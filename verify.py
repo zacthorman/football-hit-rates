@@ -28,6 +28,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import hitrates
 import model
 import report
 
@@ -98,7 +99,116 @@ console.log(JSON.stringify(out));
     return json.loads(result.stdout)
 
 
+def check_zero_fill() -> None:
+    """The zero-fill set exists in both copies and they agree.
+
+    This lives here because the set is duplicated on purpose: hitrates.py fills
+    the gaps at fetch time so new data is right, and report.py fills them again
+    at render time so reports built before the fix are corrected by a re-render.
+    Two copies of one list is exactly the drift verify.py exists to catch.
+
+    It also catches the dumber failure that actually happened: the use in
+    player_form() was shipped without the constant it referenced, so every build
+    with --players died on a NameError. Nothing tested that path, because the
+    only way to reach it is a live fetch. Touching the name from here means an
+    import is enough to notice.
+    """
+    py = set(hitrates.PLAYER_ZERO_FILL)
+
+    match = re.search(r"const ZERO_FILL = new Set\(\[(.*?)\]\);", report.JS, re.S)
+    if not match:
+        raise SystemExit("could not find ZERO_FILL in report.py's JS")
+    js = set(re.findall(r'"([^"]+)"', match.group(1)))
+
+    if py != js:
+        print("ZERO_FILL disagrees between hitrates.py and report.py:")
+        for name in sorted(py - js):
+            print(f"  only in hitrates.py: {name}")
+        for name in sorted(js - py):
+            print(f"  only in report.py:   {name}")
+        sys.exit(1)
+
+    print(f"zero-fill set agrees, {len(py)} stats")
+
+
+def check_rating_pools() -> None:
+    """Teams that never met are not put on one scale, and no count goes <= 0.
+
+    Guards the Hull City bug. A Premier League report projected Hull to score
+    exactly 0.00 goals against Manchester United, because Hull's 38 matches
+    were all Championship and the fit normalised both divisions to one mean.
+    Three of ten fixtures in that report were affected, two of them sharing no
+    opponents at all, so this is a class of bug and not one fixture.
+
+    Built as a synthetic two-division league rather than a fixture file,
+    because the failure needs teams that provably never met, and real data
+    stops being a clean example the moment a cup tie connects them.
+    """
+    names = {"ALL": ["Goals", "Corner kicks"]}
+
+    def build(ids, mean_g, mean_c, tag, strengths):
+        recs = {t: [] for t in ids}
+        for a in ids:
+            for b in ids:
+                if a == b:
+                    continue
+                sa, sb = strengths[a], strengths[b]
+                recs[a].append({
+                    "id": a * 1000 + b, "date": "2025-01-01", "competition": tag,
+                    "opponent": f"T{b}", "opponent_id": b, "venue": "home",
+                    "goals_for": 1, "goals_against": 1, "result": "D",
+                    "stats": {"ALL": {"Goals": mean_g * sa / sb,
+                                      "Corner kicks": mean_c * sa / sb}},
+                    "against": {"ALL": {"Goals": mean_g * sb / sa,
+                                        "Corner kicks": mean_c * sb / sa}},
+                })
+        return recs
+
+    top, lower = list(range(1, 9)), list(range(9, 17))
+    strength = {t: 0.6 + 0.16 * (i % 8) for i, t in enumerate(top + lower)}
+    records = {}
+    records.update(build(top, 2.0, 6.0, "Premier League", strength))
+    records.update(build(lower, 1.0, 4.0, "Championship", strength))
+
+    pools = hitrates.rating_pools(records)
+    if len(pools) != 2:
+        print(f"rating pools: expected 2 disconnected groups, got {len(pools)}")
+        sys.exit(1)
+
+    ratings = hitrates.league_ratings(records, names)
+
+    if hitrates.project_fixture(ratings, 9, 1, names) != {}:
+        print("rating pools: projected across divisions that never met")
+        sys.exit(1)
+
+    if not hitrates.project_fixture(ratings, 1, 2, names).get("ALL", {}).get("Goals"):
+        print("rating pools: a normal same-division projection was lost")
+        sys.exit(1)
+
+    single = build(list(range(1, 13)), 2.5, 5.0, "Premier League",
+                   {t: 0.7 + 0.05 * t for t in range(1, 13)})
+    solo = hitrates.league_ratings(single, names)
+    if len(hitrates.rating_pools(single)) != 1:
+        print("rating pools: a fully connected league was split")
+        sys.exit(1)
+
+    for home in range(1, 13):
+        for away in range(1, 13):
+            if home == away:
+                continue
+            for stat, pair in hitrates.project_fixture(
+                    solo, home, away, names).get("ALL", {}).items():
+                if min(pair) <= 0:
+                    print(f"rating pools: non-positive projection {stat}={pair}")
+                    sys.exit(1)
+
+    print("rating pools: disconnected leagues refused, connected ones intact")
+
+
 def main() -> None:
+    check_zero_fill()
+    check_rating_pools()
+
     if not shutil.which("node"):
         print("node is not installed, skipping the cross-check.")
         print("The Python model is still tested by its own numbers in the docstring.")

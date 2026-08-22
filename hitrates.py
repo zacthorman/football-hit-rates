@@ -872,7 +872,30 @@ PROJECTION_FLOOR = 0.25
 # compared. Within a division every pair clears this comfortably: the Premier
 # League fixtures checked all shared 18. A cross-division pairing joined only
 # by a cup tie scores 0 or 1, which is the case this exists to reject.
-MIN_POOL_LINKS = 4
+MIN_POOL_LINKS = 2
+
+# Set deliberately low while this is being tuned. The pool test is transitive:
+# two teams can land in one pool through a chain of other clubs, so the bar
+# each *pair* clears is not the bar the pool clears. On real data that made the
+# outcome incoherent -- a Championship pair sharing one opponent kept all 11
+# projections while another sharing two got none, and Malaga v Deportivo, with
+# 22 shared opponents, was rejected outright.
+#
+# So the pair check below is the one that actually decides a fixture, and this
+# constant only governs how the pools are grown. Two is loose on purpose: it
+# rejects the pure cup-tie bridge that caused the Hull City bug and little
+# else, which is the right trade while the honest tuning is still outstanding.
+# See MIN_PAIR_LINKS for the guard that does the real work.
+
+# Shared opponents required between the two sides of a fixture before their
+# projection is trusted. Measured directly on the pair, so it means the same
+# thing for every fixture, unlike the transitive pool test.
+#
+# Four separates the real cases cleanly in the data checked so far: healthy
+# league pairings share 18 to 22, while the cross-division ones that produced
+# nonsense share 0 or 1. It is a provisional number, not a derived one, and
+# wants revisiting against settled results rather than against my judgement.
+MIN_PAIR_LINKS = 4
 
 
 def rating_pools(records_by_team: dict[int, list[dict]],
@@ -1095,6 +1118,13 @@ def league_ratings(
     ratings["samples"] = {str(t): samples[t] for t in ids}
     ratings["minMatches"] = min_matches
 
+    # Who each team has actually played, so a fixture can be judged on the two
+    # sides in front of it rather than on the pool they were swept into.
+    ratings["opponents"] = {
+        str(t): sorted({r.get("opponent_id") for r in records_by_team[t]
+                        if r.get("opponent_id") is not None})
+        for t in ids
+    }
     ratings["pools"] = {str(t): pool_index[t] for t in ids}
     ratings["poolSizes"] = [len(pool) for pool in pools]
 
@@ -1127,16 +1157,29 @@ def project_fixture(
     """
     out: dict = {}
 
-    # Refuse outright if the two sides were never on the same scale. A rating
-    # is a multiplier relative to a pool's own average, so comparing one
-    # across pools is a category error, not merely a noisy estimate. Better no
-    # projection than a confident wrong one: the report already knows how to
-    # fall back to the raw record and say so.
-    pools = ratings.get("pools") or {}
-    home_pool = pools.get(str(home_id))
-    away_pool = pools.get(str(away_id))
-    if home_pool is not None and away_pool is not None and home_pool != away_pool:
-        return {}
+    # Refuse if these two sides were never measured against a common standard.
+    # A rating is a multiplier relative to an average, so comparing two that
+    # were calibrated on different sets of opponents is a category error, not
+    # merely a noisy estimate. Better no projection than a confident wrong
+    # one: the report already falls back to the raw record and says so.
+    #
+    # Judged on the pair directly rather than on pool membership. The pool test
+    # is transitive, so two teams can share a pool through a chain of other
+    # clubs, which made the outcome incoherent on real data: one Championship
+    # pair sharing a single opponent kept every projection while another
+    # sharing two lost all of them. Counting the opponents these two actually
+    # have in common means the same thing for every fixture.
+    opponents = ratings.get("opponents") or {}
+    mine = set(opponents.get(str(home_id)) or [])
+    theirs = set(opponents.get(str(away_id)) or [])
+    if mine and theirs:
+        links = len(mine & theirs)
+        # Having played each other counts, but only for one: it is evidence,
+        # and a single cup tie is not much of it.
+        if away_id in mine or home_id in theirs:
+            links += 1
+        if links < MIN_PAIR_LINKS:
+            return {}
 
     home_att = ratings.get("attack", {}).get(str(home_id), {})
     away_att = ratings.get("attack", {}).get(str(away_id), {})

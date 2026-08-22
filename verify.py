@@ -212,6 +212,30 @@ def check_rating_pools() -> None:
         print("rating pools: projected across divisions joined by one cup tie")
         sys.exit(1)
 
+    # The same shared-opponent count must always give the same answer. Pool
+    # membership is transitive and did not: on real data one Championship pair
+    # sharing a single opponent kept all 11 projections while another sharing
+    # two lost every one. Judged on the pair, the outcome is a pure function of
+    # the evidence, which is the property that makes the rule explainable.
+    opp = ratings.get("opponents") or {}
+
+    def shared(a, b):
+        m, t = set(opp.get(str(a)) or []), set(opp.get(str(b)) or [])
+        n = len(m & t)
+        if b in m or a in t:
+            n += 1
+        return n
+
+    seen: dict[int, bool] = {}
+    for a, b in [(1, 2), (3, 4), (9, 10), (11, 12), (9, 1), (2, 10), (5, 13)]:
+        count = shared(a, b)
+        projected = bool(hitrates.project_fixture(
+            ratings, a, b, names).get("ALL", {}))
+        if count in seen and seen[count] != projected:
+            print(f"rating pools: {count} shared opponents gave both answers")
+            sys.exit(1)
+        seen[count] = projected
+
     single = build(list(range(1, 13)), 2.5, 5.0, "Premier League",
                    {t: 0.7 + 0.05 * t for t in range(1, 13)})
     solo = hitrates.league_ratings(single, names)
@@ -229,7 +253,7 @@ def check_rating_pools() -> None:
                     print(f"rating pools: non-positive projection {stat}={pair}")
                     sys.exit(1)
 
-    print("rating pools: thin links refused (incl. cup ties), real leagues intact")
+    print("rating pools: pair test consistent, cup-tie bridges refused")
 
 
 def main() -> None:

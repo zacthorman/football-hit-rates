@@ -303,6 +303,33 @@ def tier_map_for(tournament_id: int | None) -> dict:
     return tier_map
 
 
+def match_result(event: dict) -> dict | None:
+    """The score and per-stat outcome of a fixture that has been played.
+
+    Returns None for anything upcoming, which is the normal case and not a
+    failure. Fetching this costs one request per played fixture, and only for
+    fixtures already in the report, so it does not widen the crawl.
+    """
+    if (event.get("status") or {}).get("type") != "finished":
+        return None
+
+    raw = api.event_statistics(event["id"])
+    stats = hitrates.extract_match_stats(raw)
+    if not stats:
+        return None
+
+    return {
+        "home": event.get("homeScore", {}).get("current"),
+        "away": event.get("awayScore", {}).get("current"),
+        # {period: {stat: [home, away]}}, matching the projection's shape so
+        # the two can be compared directly in the page.
+        "stats": {
+            period: {name: list(pair) for name, pair in bucket.items()}
+            for period, bucket in stats.items()
+        },
+    }
+
+
 def build_fixture(
     event: dict, games: int, players: bool, h2h: bool = False,
     adjust: bool = False, all_stats: bool = False, tiers: bool = False,
@@ -354,6 +381,11 @@ def build_fixture(
             {"name": home["name"], "side": "home"},
             {"name": away["name"], "side": "away"},
         ],
+        # What actually happened, when it already has. Carried in the payload
+        # so a played fixture can show whether its own projections held up,
+        # rather than the report going quiet the moment a match kicks off.
+        # None for anything still to come.
+        "result": match_result(event),
         # Two chart colours derived from the clubs' actual kits. Worked out
         # here rather than in the browser because it needs the kit colours
         # from the API, and because the result is fixed for the fixture.

@@ -411,6 +411,69 @@ select, .num-input {
 }
 .pick-foot b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .pick-foot .add-btn { margin-left: auto; }
+
+/* A player with barely any appearances. Shown rather than hidden, because a
+   missing player reads as missing data, but marked so a 100% record off one
+   match is never mistaken for a strong one. */
+tr.thin { opacity: 0.78; }
+.tag-thin {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.rec-legs { margin: 0.5rem 0 0.6rem 1.1rem; padding: 0; }
+.rec-legs li { margin: 0.2rem 0; }
+#rec-controls { margin-top: 0.4rem; }
+
+/* The custom bet builder. A grid so it wraps sensibly on a phone rather than
+   forcing a horizontal scroll, which is where this would be used most. */
+#custom-wrap {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+  background: var(--surface-raised);
+}
+#custom-wrap summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.2rem 0;
+}
+.custom-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: flex-end;
+  margin: 0.6rem 0;
+}
+.custom-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.custom-row select, .custom-row input {
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  min-width: 7rem;
+}
+.custom-row input { width: 6.5rem; min-width: 0; }
+#c-preview:not(:empty) {
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+  margin-top: 0.2rem;
+}
 .need-cell { display: inline-flex; align-items: baseline; gap: 5px; }
 .src {
   font-size: 10.5px; font-weight: 600; color: var(--muted);
@@ -1649,6 +1712,111 @@ function scanMatchups(minSample) {
   return { found: list, combos, skipped };
 }
 
+/* ----------------------------------------------------- recommended slip
+
+   One suggested multiple per fixture: the fewest, best-evidenced legs whose
+   fair prices multiply past a target.
+
+   The honest framing matters here, so it is worth being explicit. A multiple
+   is a worse bet than its legs -- the margin compounds, and the legs in one
+   match are correlated, which makes the true price longer than the product of
+   the parts. This exists because a short-priced single is dull, not because it
+   is good value, and the panel says so rather than dressing it up.
+
+   Selection is greedy on evidence, not on price. Taking the longest prices
+   first would reach any target in two legs and would be the worst three bets
+   on the board. So legs are ordered by how well supported they are, and the
+   longest-priced among the well-supported ones are added until the product
+   clears the target. */
+
+function recommendedSlip() {
+  const box = document.getElementById("rec-slip");
+  if (!box) return;
+
+  const target = parseFloat(document.getElementById("rtarget")?.value) || 3.0;
+  const wanted = Math.max(2, parseInt(document.getElementById("rlegs")?.value, 10) || 3);
+
+  const pool = (window.__best || []).filter(r => {
+    const pr = r.price || priceRow(r);
+    return isFinite(pr.fair) && pr.fair > 1.05 && !pr.conflict;
+  });
+
+  if (pool.length < 2) {
+    box.innerHTML = `<div class="caution"><strong>No slip to suggest.</strong>
+      There are not enough priceable bets here to build one.</div>`;
+    return;
+  }
+
+  // Each leg needs to carry its share of the target. Asking for 3.00 from
+  // three legs means about 1.44 each, so legs are drawn from those that clear
+  // that bar, best-evidenced first.
+  //
+  // The first version sorted purely on evidence and took the top three, which
+  // produced three near-certainties multiplying to 1.38 -- nowhere near the
+  // target, and a slip nobody would place. Sorting purely on price is the
+  // opposite mistake: it reaches any target in two legs by taking the two
+  // worst bets on the board. The share-of-target bar is what balances the two.
+  const perLeg = Math.pow(target, 1 / wanted);
+  const fairOf = r => (r.price || priceRow(r)).fair;
+
+  const byEvidence = (a, b) => {
+    const ea = wilsonLow(a.k, a.n), eb = wilsonLow(b.k, b.n);
+    if (Math.abs(ea - eb) > 0.04) return eb - ea;
+    return fairOf(b) - fairOf(a);
+  };
+
+  // One leg per team per stat, so the slip is not three ways of betting on the
+  // same thing happening. Correlated legs are the standard way a multiple
+  // looks better than it is.
+  const legs = [];
+  const used = new Set();
+  const take = candidates => {
+    for (const r of candidates) {
+      if (legs.length >= wanted) return;
+      const key = `${r.fixtureIndex}|${r.teamIndex}|${r.stat}`;
+      if (used.has(key)) continue;
+      used.add(key);
+      legs.push(r);
+    }
+  };
+
+  // Legs that pull their weight first, then anything else to make up the
+  // count, longest price first so the shortfall is as small as it can be.
+  take(pool.filter(r => fairOf(r) >= perLeg).sort(byEvidence));
+  take(pool.slice().sort((a, b) => fairOf(b) - fairOf(a)));
+
+  window.__recLegs = legs;
+  const combined = legs.reduce((acc, r) => acc * (r.price || priceRow(r)).fair, 1);
+  const rows = legs.map(r => {
+    const pr = r.price || priceRow(r);
+    return `<li>${escapeHtml(r.team)} ${r.over ? "over" : "under"} ${r.line}
+      ${escapeHtml(r.stat.toLowerCase())}
+      ${r.period !== "ALL" ? `(${escapeHtml((ALL.periods || {})[r.period] || r.period)})` : ""}
+      &mdash; <strong>${fmtOdds(pr.fair)}</strong> fair,
+      record ${r.k}/${r.n}</li>`;
+  }).join("");
+
+  const short = combined < target;
+
+  box.innerHTML = `<div class="caution">
+    <strong>Suggested ${legs.length}-leg slip.</strong>
+    Fair combined price <strong>${fmtOdds(combined)}</strong>
+    ${short
+      ? `, which is short of your ${fmtOdds(target)} target. These are the
+         best-supported legs available; reaching ${fmtOdds(target)} would mean
+         taking worse ones.`
+      : `, against your ${fmtOdds(target)} target.`}
+    <ol class="rec-legs">${rows}</ol>
+    <button type="button" class="add-btn" id="rec-add">Add these to my slip</button>
+    <br><br>
+    These are fair prices, not offers. You need a bookmaker to beat every one of
+    them for the multiple to be worth taking, and the legs come from one round,
+    so they are more correlated than the arithmetic assumes. A multiple is the
+    shop's best product, not yours.
+  </div>`;
+}
+
+
 function bestBetsView() {
   const minSample = parseInt(document.getElementById("bmin").value, 10) || 4;
   const limit = parseInt(document.getElementById("btop").value, 10) || 10;
@@ -1665,6 +1833,7 @@ function bestBetsView() {
       at ${Math.round(MATCHUP_FLOOR * 100)}% or better on at least ${minSample}
       matches each. Lower "Min each side", or widen the scope.</p>`;
     window.__best = [];
+    recommendedSlip();
     return;
   }
 
@@ -1686,6 +1855,7 @@ function bestBetsView() {
       out because the model and the record contradicted each other. That
       usually means the ratings fit is thin for this competition.</p>`;
     window.__best = [];
+    recommendedSlip();
     return;
   }
 
@@ -1778,6 +1948,7 @@ function bestBetsView() {
   }).join("");
 
   window.__best = shown;
+  recommendedSlip();
 
   const weakest = shown[shown.length - 1];
   const expected = combos * binomTail(weakest.n, weakest.k);
@@ -1925,8 +2096,14 @@ function scorePick(r, price) {
     parts.value = 0;
   } else {
     const need = (r.price || priceRow(r)).need;
-    const ratio = price / need;
-    parts.value = Math.max(0, Math.min(45, Math.round((ratio - 0.85) * 150)));
+    // A record of 0 from n gives a Wilson lower bound of 0 and therefore an
+    // infinite need, which turned the whole score into NaN. It is not an
+    // error: it means the evidence supports no price at all, so no price can
+    // beat it. Score the value at zero and let the evidence and agreement
+    // parts speak instead.
+    const ratio = (isFinite(need) && need > 0) ? price / need : 0;
+    parts.value = Math.max(0, Math.min(45,
+      Math.round((ratio - 0.85) * 150) || 0));
   }
 
   // Evidence: how much data sits behind it.
@@ -2047,6 +2224,305 @@ function slipView() {
     </table></div>`;
 }
 
+/* ------------------------------------------------------------ post-match
+
+   For a fixture that has been played: what the projections said, what actually
+   happened, and why each one held or did not.
+
+   The point is not to keep score. It is that a projection which was wrong is
+   only useful if you can see *how* it was wrong, and the two failure modes look
+   nothing alike. A projection of 5.2 corners against an actual 5 that still
+   lost the bet is a line problem. A projection of 5.2 against an actual 1 is a
+   model problem. Printing both as "missed" would hide the only distinction
+   that matters.
+
+   Nothing here is fitted or adjusted. It reports and stops, for the same
+   reason review.py does: a single match is far too little to learn from, and
+   the temptation to tune on it is exactly how a model ends up explaining last
+   Saturday and knowing nothing about next Saturday. */
+
+function resultView() {
+  const box = document.getElementById("result");
+  if (!box) return;
+
+  const res = DATA.fixture.result;
+  if (!res) { box.innerHTML = ""; return; }
+
+  const proj = DATA.projection || {};
+  const lines = [];
+
+  Object.keys(proj).forEach(per => {
+    Object.entries(proj[per] || {}).forEach(([stat, pair]) => {
+      const got = ((res.stats || {})[per] || {})[stat];
+      if (!got) return;
+
+      [0, 1].forEach(side => {
+        const expected = pair[side];
+        const actual = got[side];
+        if (expected === undefined || actual === undefined) return;
+        lines.push({
+          per, stat, side, expected, actual,
+          error: expected > 0 ? (actual - expected) / expected : 0,
+        });
+      });
+    });
+  });
+
+  if (!lines.length) {
+    box.innerHTML = `<div class="caution">
+      <strong>${escapeHtml(DATA.fixture.home)} ${res.home}&ndash;${res.away}
+      ${escapeHtml(DATA.fixture.away)}.</strong>
+      This fixture had no projections to check, so there is nothing to review.
+    </div>`;
+    return;
+  }
+
+  // Worst first: the misses are the informative part, and burying them under
+  // the hits is how a review becomes a victory lap.
+  lines.sort((a, b) => Math.abs(b.error) - Math.abs(a.error));
+
+  const close = lines.filter(l => Math.abs(l.error) <= 0.2).length;
+  const rows = lines.slice(0, 14).map(l => {
+    const team = DATA.teams[l.side].name;
+    const period = l.per !== "ALL"
+      ? ` (${escapeHtml((ALL.periods || {})[l.per] || l.per)})` : "";
+    const pct = (l.error * 100).toFixed(0);
+
+    let verdict, cls;
+    if (Math.abs(l.error) <= 0.2) {
+      verdict = "projection held";
+      cls = "good";
+    } else if (Math.abs(l.error) <= 0.45) {
+      verdict = l.error > 0 ? "ran over the projection" : "fell short of it";
+      cls = "";
+    } else {
+      verdict = l.error > 0 ? "far above the projection" : "far below it";
+      cls = "poor";
+    }
+
+    return `<tr>
+      <td>${escapeHtml(team)} ${escapeHtml(l.stat.toLowerCase())}${period}</td>
+      <td class="num">${l.expected.toFixed(1)}</td>
+      <td class="num">${l.actual}</td>
+      <td class="num ${cls}">${l.error > 0 ? "+" : ""}${pct}%</td>
+      <td>${verdict}</td>
+    </tr>`;
+  }).join("");
+
+  const share = Math.round(close / lines.length * 100);
+
+  box.innerHTML = `<div class="caution">
+    <strong>${escapeHtml(DATA.fixture.home)} ${res.home}&ndash;${res.away}
+    ${escapeHtml(DATA.fixture.away)} &mdash; how the projections did.</strong>
+    ${close} of ${lines.length} landed within 20% of the projection (${share}%).
+    <div class="board"><table class="ptable">
+      <thead><tr>
+        <th>Stat</th><th>Projected</th><th>Actual</th><th>Error</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    One match is far too little to draw a conclusion from, and a projection
+    that missed by 60% here is not evidence the model is broken any more than
+    one that landed is evidence it works. What it is good for is spotting a
+    pattern across weeks: run <code>review.py</code> once a few rounds have
+    settled, and that will tell you something this table cannot.
+  </div>`;
+}
+
+
+/* ------------------------------------------------------- custom bet builder
+
+   Build any bet over a stat this report tracks, at any line, and have it
+   scored by exactly the same machinery as a scanned one. That last part is the
+   whole point: a bet you type in has to be comparable with one the scan found,
+   or the slip is mixing two different meanings of "score".
+
+   So this constructs the same row shape the scan produces -- same keys, same
+   values array, same record -- and hands it to the same priceRow(). Nothing
+   here reimplements any maths. Markets outside these stats are deliberately
+   not offered, because there is no record behind them to price against, and a
+   score with nothing under it would be worse than no score. */
+
+function customFixture() {
+  const i = parseInt(document.getElementById("c-fixture").value, 10);
+  return ALL.fixtures[i] || DATA;
+}
+
+function fillCustom() {
+  const fxSel = document.getElementById("c-fixture");
+  if (!fxSel) return;
+
+  const current = ALL.fixtures.indexOf(DATA);
+  fxSel.innerHTML = ALL.fixtures.map((f, i) =>
+    `<option value="${i}"${i === current ? " selected" : ""}>` +
+    `${escapeHtml(f.fixture.home)} v ${escapeHtml(f.fixture.away)}</option>`
+  ).join("");
+
+  fillCustomTeams();
+}
+
+function fillCustomTeams() {
+  const fx = customFixture();
+  const teamSel = document.getElementById("c-team");
+  teamSel.innerHTML = fx.teams.map((t, i) =>
+    `<option value="${i}">${escapeHtml(t.name)}</option>`).join("");
+
+  const perSel = document.getElementById("c-period");
+  perSel.innerHTML = Object.keys(fx.stats || {}).map(per =>
+    `<option value="${per}">${escapeHtml((ALL.periods || {})[per] || per)}</option>`
+  ).join("");
+
+  fillCustomPlayers();
+  fillCustomStats();
+}
+
+function fillCustomPlayers() {
+  const fx = customFixture();
+  const teamIndex = parseInt(document.getElementById("c-team").value, 10) || 0;
+  const sel = document.getElementById("c-player");
+  const records = (fx.players || [])[teamIndex] || [];
+
+  const names = [...new Set(records.map(r => r.player))].sort();
+  sel.innerHTML = `<option value="">Team stat</option>` +
+    names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+}
+
+function fillCustomStats() {
+  const fx = customFixture();
+  const player = document.getElementById("c-player").value;
+  const per = document.getElementById("c-period").value || "ALL";
+  const sel = document.getElementById("c-stat");
+
+  // A player bet is always whole-match: SofaScore does not split a player's
+  // numbers by half, so offering a half here would be inventing data.
+  const names = player
+    ? (fx.playerStats || []).filter(n => BETTABLE.has(n) || PLAYER_EXTRA.has(n))
+    : (fx.stats[per] || []).filter(n => BETTABLE.has(n));
+
+  sel.innerHTML = names.map(n =>
+    `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+
+  document.getElementById("c-period").disabled = !!player;
+  customPreview();
+}
+
+/* Player stats worth betting that the team-level BETTABLE list does not carry.
+   Fouls is the one that matters: it is the closest thing this data has to a
+   card market, since cards are not in the per-player feed at all. */
+const PLAYER_EXTRA = new Set(["Fouls", "Fouled", "Saves", "Goals", "Assists"]);
+
+/* The row a custom bet describes, in the shape the scan and the slip expect,
+   or null when there is not enough behind it to price. */
+function customRow() {
+  const fx = customFixture();
+  const fixtureIndex = parseInt(document.getElementById("c-fixture").value, 10) || 0;
+  const teamIndex = parseInt(document.getElementById("c-team").value, 10) || 0;
+  const playerName = document.getElementById("c-player").value;
+  const stat = document.getElementById("c-stat").value;
+  const per = playerName ? "ALL" : (document.getElementById("c-period").value || "ALL");
+  const over = document.getElementById("c-side").value === "over";
+  const line = parseFloat(document.getElementById("c-line").value);
+  const price = parseFloat(document.getElementById("c-price").value) || 0;
+
+  if (!stat || !isFinite(line)) return null;
+
+  if (playerName) {
+    const records = (fx.players || [])[teamIndex] || [];
+    const mine = records.filter(r => r.player === playerName);
+
+    // Appearances, not raw rows: a match he did not play is an absence, not a
+    // zero, and counting it as a zero is what made every player price wrong
+    // once before. appearances() applies the same minutes floor and zero-fill
+    // the Players tab uses, so a bet built here means the same thing.
+    const apps = appearances(mine, stat);
+    if (apps.length < 3) return null;
+
+    const vals = apps.map(a => a.value);
+    const hits = vals.filter(v => over ? v > line : v < line).length;
+
+    // Priced through pricePlayer(), not the team path. A player expectation is
+    // a per-90 rate scaled to the minutes he is likely to get, and the team
+    // path has no notion of minutes at all: it found no projection, fell back
+    // to the bare record, and priced a fouls under at 1.00 off a 0/14 record.
+    const price_ = pricePlayer(apps, line, over, playerAdjustment(stat, teamIndex));
+
+    return {
+      player: playerName,
+      stat, line, over, period: "ALL",
+      k: hits, n: vals.length,
+      score: wilsonLow(hits, vals.length),
+      team: fx.teams[teamIndex].name,
+      teamIndex,
+      fixture: `${fx.fixture.home} v ${fx.fixture.away}`,
+      fixtureIndex,
+      chance: binomTail(vals.length, hits),
+      forVals: vals, vals,
+      price: price_,
+      typed: price,
+      custom: true,
+    };
+  }
+
+  const rows = fx.records[teamIndex] || [];
+  const vals = rows.map(r => (r.stats[per] || {})[stat])
+                   .filter(v => v !== undefined && v !== null);
+  if (vals.length < 3) return null;
+
+  const hits = vals.filter(v => over ? v > line : v < line).length;
+  const opponent = fx.teams[1 - teamIndex].name;
+
+  return {
+    stat, line, over, period: per,
+    k: hits, n: vals.length,
+    score: wilsonLow(hits, vals.length),
+    team: fx.teams[teamIndex].name,
+    teamIndex,
+    opponent,
+    fixture: `${fx.fixture.home} v ${fx.fixture.away}`,
+    fixtureIndex,
+    chance: binomTail(vals.length, hits),
+    forVals: vals, vals, price,
+    custom: true,
+  };
+}
+
+function customPreview() {
+  const box = document.getElementById("c-preview");
+  if (!box) return;
+
+  const r = customRow();
+  if (!r) {
+    box.innerHTML = `<span class="muted">Pick a stat with at least three
+      matches behind it.</span>`;
+    return;
+  }
+
+  // A player row carries its own price, worked out from minutes; a team row is
+  // priced from the fixture projection. Using priceRow() for both showed a
+  // player bet as fair 1.00, because the team path has no player projection to
+  // find and quietly fell back to the raw record.
+  const priced = r.player ? r.price : priceRow(r);
+  const price = parseFloat(document.getElementById("c-price").value) || 0;
+  const { total, parts } = scorePick(r, price);
+
+  const verdict = !price
+    ? "Type a price to score it."
+    : price >= priced.need
+      ? `<strong>${fmtOdds(price)} clears the ${fmtOdds(priced.need)} you need.</strong>`
+      : `<strong>${fmtOdds(price)} is short of the ${fmtOdds(priced.need)} you need.</strong>`;
+
+  box.innerHTML = `
+    Record <strong>${r.k}/${r.n}</strong>.
+    Fair <strong>${fmtOdds(priced.fair)}</strong>,
+    need <strong>${fmtOdds(priced.need)}</strong>.
+    ${price ? `Score <strong>${total}</strong>/100.` : ""}
+    ${verdict}
+    ${priced.conflict ? `<br><span class="muted">The record and the projection
+      disagree beyond either one's uncertainty here, so treat both with
+      suspicion.</span>` : ""}`;
+}
+
+
 /* ---------------------------------------------------------------- players */
 
 /* Every player row currently on screen, so the Add button can find its pick
@@ -2106,16 +2582,34 @@ function playerView() {
       // every player price nonsense.
       const apps = appearances(played, stat);
       const vals = apps.map(a => a.value);
-      if (vals.length < minApps) return null;
+
+      // A new signing is not the same thing as a fringe player, and hiding
+      // both behind one appearance count conflates them. Christos Tzolis
+      // started for Arsenal with one appearance in the sample and simply was
+      // not on the page: the data was there, the minimum hid it, and the
+      // absence looked identical to a missing transfer.
+      //
+      // So anyone who has actually played is kept, and the ones below the
+      // minimum are marked as thin rather than dropped. A single match is
+      // genuinely weak evidence, which is what the flag says; it is not a
+      // reason to pretend the player does not exist.
+      if (!vals.length) return null;
+      const thin = vals.length < minApps;
+
       const hits = vals.filter(v => v > line).length;
       const pct = Math.round((hits / vals.length) * 100);
       const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       const missed = played.length - apps.length;
       return { name, pos: played[0].position || "", played, apps, vals,
-               hits, pct, avg, missed };
+               hits, pct, avg, missed, thin };
     }).filter(Boolean);
 
-    built.sort((a, b) => b.pct - a.pct || b.vals.length - a.vals.length);
+    // Well-evidenced players first, then the thin ones. A single appearance
+    // sorting to the top on a 100% record would be the most misleading row on
+    // the page.
+    built.sort((a, b) =>
+      (a.thin ? 1 : 0) - (b.thin ? 1 : 0) ||
+      b.pct - a.pct || b.vals.length - a.vals.length);
 
     if (!built.length) {
       return `<div class="team-block">${title}
@@ -2140,8 +2634,14 @@ function playerView() {
       const inSlip = SLIP.some(s => s.key === rowKey(row));
       const index = PLAYER_ROWS.push({ row, price }) - 1;
 
-      return `<tr class="${strong ? "strong" : ""}">
-        <td class="player-name">${p.name}<span class="pos">${p.pos}</span></td>
+      return `<tr class="${strong ? "strong" : ""}${p.thin ? " thin" : ""}">
+        <td class="player-name">${p.name}<span class="pos">${p.pos}</span>${
+          p.thin
+            ? `<span class="tag-thin" title="Only ${p.vals.length} appearance${
+                p.vals.length === 1 ? "" : "s"} in this sample: probably a new
+                signing or returning from injury. The rate may be real, but one
+                or two matches cannot tell you.">new / thin sample</span>`
+            : ""}</td>
         <td class="num" data-label="Apps">${p.vals.length}</td>
         <td class="num" data-label="Avg">${p.avg.toFixed(1)}
           ${price.source === "model"
@@ -2241,6 +2741,8 @@ function applyTeamColours() {
 
 function applyFixture() {
   applyTeamColours();
+  fillCustom();
+  resultView();
   SUGGESTED = {};
   for (const [key, bucket] of Object.entries(DATA.lines)) {
     SUGGESTED[key] = Object.assign({}, bucket);
@@ -2683,6 +3185,54 @@ document.getElementById("slip").addEventListener("input", e => {
   updateSlipTotals();
 });
 
+/* Custom bet builder wiring. Each control only rebuilds what depends on it,
+   so changing the line does not rebuild the stat list underneath the cursor --
+   the same mistake that made the slip's price field unusable. */
+["c-fixture", "c-team", "c-player", "c-period", "c-stat",
+ "c-side", "c-line", "c-price"].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener(id === "c-line" || id === "c-price" ? "input" : "change", () => {
+    if (id === "c-fixture") fillCustomTeams();
+    else if (id === "c-team") { fillCustomPlayers(); fillCustomStats(); }
+    else if (id === "c-player") fillCustomStats();
+    else if (id === "c-period") fillCustomStats();
+    else customPreview();
+  });
+});
+
+document.getElementById("c-add")?.addEventListener("click", () => {
+  const r = customRow();
+  if (!r) return;
+  const price = parseFloat(document.getElementById("c-price").value) || 0;
+  const key = rowKey(r);
+  if (SLIP.some(s => s.key === key)) return;
+  SLIP.push({ key, row: r, price });
+  slipView();
+  document.getElementById("slip-count").textContent =
+    SLIP.length ? ` (${SLIP.length})` : "";
+});
+
+["rtarget", "rlegs"].forEach(id => {
+  document.getElementById(id)?.addEventListener("input", recommendedSlip);
+});
+
+document.getElementById("rec-slip")?.addEventListener("click", e => {
+  if (!e.target.closest("#rec-add")) return;
+  let added = 0;
+  (window.__recLegs || []).forEach(r => {
+    const key = rowKey(r);
+    if (SLIP.some(s => s.key === key)) return;
+    SLIP.push({ key, row: r, price: 0 });
+    added++;
+  });
+  if (added) {
+    slipView();
+    document.getElementById("slip-count").textContent =
+      SLIP.length ? ` (${SLIP.length})` : "";
+  }
+});
+
 document.getElementById("smin").addEventListener("input", standoutSoon);
 document.getElementById("stop").addEventListener("input", standoutSoon);
 
@@ -2871,6 +3421,7 @@ def build_html(payload: dict) -> str:
 </div>
 
 <div class="panel" data-panel="team">
+  <div id="result"></div>
   <div id="mismatch"></div>
   <div class="board" id="board"></div>
 </div>
@@ -2940,6 +3491,21 @@ def build_html(payload: dict) -> str:
       </div>
     </div>
   </div>
+
+  <div id="rec-slip"></div>
+  <div class="controls" id="rec-controls">
+    <div class="control-group">
+      <span class="control-label">Target price</span>
+      <input class="num-input" id="rtarget" type="number" step="0.5" min="1.2" max="50"
+             value="3.0" aria-label="Minimum combined price">
+    </div>
+    <div class="control-group">
+      <span class="control-label">Legs</span>
+      <input class="num-input" id="rlegs" type="number" step="1" min="2" max="6"
+             value="3" aria-label="How many legs">
+    </div>
+  </div>
+
   <div id="bestbets"></div>
 </div>
 
@@ -2967,6 +3533,33 @@ def build_html(payload: dict) -> str:
 </div>
 
 <div class="panel" data-panel="slip" hidden>
+  <details id="custom-wrap">
+    <summary>Add any bet</summary>
+    <p class="note">
+      Any stat this report tracks, at any line you like, for either side. The
+      score is worked out the same way as everywhere else, from the same
+      distribution, so a bet you build here is directly comparable with one the
+      scan found. Markets outside these stats cannot be scored, because there
+      is no record behind them to price against.
+    </p>
+    <div class="custom-row">
+      <label>Fixture <select id="c-fixture"></select></label>
+      <label>Team <select id="c-team"></select></label>
+      <label>Player <select id="c-player"><option value="">Team stat</option></select></label>
+      <label>Stat <select id="c-stat"></select></label>
+      <label>Period <select id="c-period"></select></label>
+      <label>Side <select id="c-side">
+        <option value="over">Over</option>
+        <option value="under">Under</option>
+      </select></label>
+      <label>Line <input id="c-line" type="number" step="0.5" value="1.5"></label>
+      <label>Your price <input id="c-price" type="number" step="0.05" min="1.01"
+                               placeholder="e.g. 2.10"></label>
+      <button type="button" id="c-add" class="add-btn">Add to slip</button>
+    </div>
+    <div id="c-preview" class="note"></div>
+  </details>
+
   <p class="note">
     Each selection scored out of 100 on four things: how far the price beats what
     the evidence supports (45), how much data sits behind it (25), whether the

@@ -152,6 +152,36 @@ def team_next_fixture(team_id: int, tournament_id: int | None = None) -> dict | 
 _RATINGS_CACHE: dict = {}
 
 
+def _in_pool(ratings: dict, *team_ids: int) -> bool:
+    """Is any of these teams actually in the fitted ratings?
+
+    A rating exists only for clubs in the table the fit was built from. Asking
+    for one that is not there is not an error, it just returns nothing, which
+    is how a whole fixture can lose its projection without anything being
+    logged.
+    """
+    known = ratings.get("attack") or {}
+    return any(str(t) in known for t in team_ids)
+
+
+def _home_competition_id(records: list[list[dict]]) -> int | None:
+    """The competition these two clubs mostly play in.
+
+    Read off their own matches rather than the fixture's tag, because the tag
+    describes the round and these describe the teams. Cup ties and one-off
+    appearances are outvoted by a league season.
+    """
+    counts: dict[int, int] = {}
+    for team_records in records:
+        for record in team_records or []:
+            comp_id = record.get("tournament_id")
+            if isinstance(comp_id, int):
+                counts[comp_id] = counts.get(comp_id, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
 def league_ratings_for(tournament_id: int | None, games: int) -> tuple[dict, dict] | None:
     """Fit attack and defence ratings for a whole competition.
 
@@ -335,6 +365,27 @@ def build_fixture(
 
     if adjust:
         fitted = league_ratings_for(unique_id, games)
+
+        # The competition on a fixture is not always the competition its clubs
+        # play in. Malaga v Deportivo is tagged LaLiga because that is the
+        # tournament the round belongs to, but both are LaLiga 2 sides, so the
+        # fit was built from the 20 top-flight clubs and contained neither of
+        # them. The projection came back empty and the fixture silently lost
+        # every number, despite the two sharing 21 opponents and being as
+        # rateable as any pair in the report.
+        #
+        # So when neither side is in the fitted pool, refit from the division
+        # they actually play in, taken from the competition that appears most
+        # in their own recent matches.
+        if fitted and not _in_pool(fitted[0], home["id"], away["id"]):
+            own_id = _home_competition_id(records)
+            if own_id is not None and own_id != unique_id:
+                print(f"  neither club is in that division's table, "
+                      f"refitting from their own")
+                refitted = league_ratings_for(own_id, games)
+                if refitted and _in_pool(refitted[0], home["id"], away["id"]):
+                    fitted = refitted
+
         if fitted:
             ratings, league_names = fitted
             projection = hitrates.project_fixture(
@@ -463,11 +514,21 @@ def build(
     if len(fixtures) == 1:
         slug = f"{first['home']}-v-{first['away']}"
     elif len(comps) == 1:
-        # A whole division's round. Name it after the competition so each
-        # league keeps its own file instead of overwriting the last one.
-        slug = f"{first['competition']}-{len(fixtures)}-fixtures"
+        # A whole division's round, named for the competition alone.
+        #
+        # The fixture count used to be in here, and it was the single biggest
+        # source of confusion in this project. A round of 10 wrote
+        # premier-league-10-fixtures.html; next week's round of 11 wrote a new
+        # file and left the old one published forever, still serving whatever
+        # numbers were true when it was built. Twice in one afternoon a bug was
+        # reported against a stale file that had already been fixed, and the
+        # warning about it went to a log nobody reads.
+        #
+        # A stable name means each league has exactly one URL that is always
+        # current, links stay valid, and there are no orphans to prune.
+        slug = first["competition"]
     else:
-        slug = f"{len(fixtures)}-fixtures-{first['home']}"
+        slug = f"mixed-{first['home']}"
     slug = "".join(c for c in slug.lower().replace(" ", "-") if c.isalnum() or c == "-")
 
     path = OUT_DIR / f"{slug}.html"

@@ -341,9 +341,63 @@ def check_slip_input() -> None:
     print("slip: price input is not clobbered mid-type")
 
 
+def check_new_panels() -> None:
+    """The four added features are wired up, not just defined.
+
+    Each of these has a function and a place in the page, and a missing link
+    between the two fails silently: the function exists, nothing calls it, and
+    the panel is simply blank. That is hard to notice and easy to ship.
+    """
+    js = report.JS
+    # The page markup is assembled inside write_report() rather than held in a
+    # module constant, so the file's own source is the reliable place to look
+    # for an element id.
+    page = (ROOT / "report.py").read_text(encoding="utf-8")
+
+    wiring = [
+        ("customRow", 'id="c-add"', "custom bet builder"),
+        ("recommendedSlip", 'id="rec-slip"', "recommended slip"),
+        ("resultView", 'id="result"', "post-match review"),
+        ("pricePlayer", 'id="c-player"', "custom player pricing"),
+    ]
+    for fn, marker, label in wiring:
+        if f"function {fn}(" not in js:
+            print(f"panels: {label} has no {fn}()")
+            sys.exit(1)
+        if marker not in page:
+            print(f"panels: {label} has no {marker} in the page")
+            sys.exit(1)
+
+    for call in ("resultView();", "fillCustom();", "recommendedSlip();"):
+        if call not in js:
+            print(f"panels: nothing calls {call}")
+            sys.exit(1)
+
+    # A custom player bet must price through pricePlayer(), not the team path.
+    # Using priceRow() there ignores minutes and showed a fouls under at 1.00.
+    if "r.player ? r.price : priceRow(r)" not in js:
+        print("panels: the custom preview does not use the player price")
+        sys.exit(1)
+
+    # A player with few appearances must be shown and marked, not dropped.
+    # Christos Tzolis started for Arsenal with one appearance in the sample and
+    # was simply absent from the page, which looked exactly like the transfer
+    # never having been picked up at all.
+    if "if (!vals.length) return null;" not in js:
+        print("panels: players below the minimum are still being dropped")
+        sys.exit(1)
+    if "tag-thin" not in page:
+        print("panels: thin-sample players are not marked")
+        sys.exit(1)
+
+    print("panels: custom builder, recommended slip and post-match all wired")
+    print("players: thin samples shown and flagged, not hidden")
+
+
 def main() -> None:
     check_zero_fill()
     check_slip_input()
+    check_new_panels()
     check_rating_pools()
     check_clustering()
 

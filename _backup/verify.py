@@ -290,8 +290,60 @@ def check_clustering() -> None:
     print("clustering: correlated bets discounted, independent ones untouched")
 
 
+def check_slip_input() -> None:
+    """The slip must not rebuild itself while a price is being typed.
+
+    The price field used to re-render the whole table 200ms after the first
+    keystroke, which replaced the input element being typed into. Focus, cursor
+    and any characters since were lost, so "2.50" ended up as "2.5" and the box
+    appeared to reject input altogether.
+
+    Checked by reading the JS rather than driving a browser, because verify.py
+    has to run anywhere. Two properties matter: the input handler must not
+    schedule a full slipView(), and the combined-price panel must live in its
+    own element so it can refresh without touching the table.
+    """
+    js = report.JS
+
+    handler = re.search(
+        r'getElementById\("slip"\)\.addEventListener\("input".*?\n\}\);',
+        js, re.S)
+    # Non-greedy still runs past the first close when the body contains nested
+    # braces at column 0, so cut at the first line that closes the listener.
+    if handler:
+        text = handler.group(0)
+        end = text.find("\n});")
+        handler_body = text[:end + 4] if end >= 0 else text
+    else:
+        handler_body = None
+    if not handler:
+        print("slip: could not find the price input handler")
+        sys.exit(1)
+
+    # Strip comments before checking: this handler's own comment explains the
+    # bug and names slipView(), which would otherwise trip the test.
+    body = re.sub(r"/\*.*?\*/", "", handler_body or "", flags=re.S)
+    body = re.sub(r"//[^\n]*", "", body)
+    if "slipView" in body:
+        print("slip: the price handler still re-renders the whole slip, which")
+        print("      destroys the input being typed into")
+        sys.exit(1)
+
+    if 'id="slip-combo"' not in js:
+        print("slip: the combined-price panel has no element of its own to refresh")
+        sys.exit(1)
+
+    for name in ("comboPanel", "updateSlipTotals"):
+        if f"function {name}(" not in js:
+            print(f"slip: {name}() is missing")
+            sys.exit(1)
+
+    print("slip: price input is not clobbered mid-type")
+
+
 def main() -> None:
     check_zero_fill()
+    check_slip_input()
     check_rating_pools()
     check_clustering()
 

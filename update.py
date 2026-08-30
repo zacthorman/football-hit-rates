@@ -196,6 +196,26 @@ def run(command: list[str], dry: bool, allow_fail: bool = False) -> bool:
     return True
 
 
+def run_with_retries(command: list[str], dry: bool,
+                     tries: int = 3, delay: int = 15) -> bool:
+    """Run a command that needs the network, retrying with backoff.
+
+    Only for steps that are safe to repeat. A push either fails again or lands
+    the same commit, so it qualifies; a fetch or a build does not go through
+    here because repeating those costs hours.
+    """
+    for attempt in range(1, tries + 1):
+        if run(command, dry):
+            return True
+        if attempt == tries:
+            return False
+        say(f"  that step needs the network, retrying in {delay}s "
+            f"(attempt {attempt} of {tries})")
+        time.sleep(delay)
+        delay *= 2
+    return False
+
+
 def python_exe() -> str:
     """The interpreter running this file.
 
@@ -265,13 +285,41 @@ def main() -> None:
         say(f"update starting, python {python}")
         say(f"pacing: {env_note}")
 
+        resume_publish = False
         if STATUS.exists():
             previous = json.loads(STATUS.read_text(encoding="utf-8"))
             gap = (time.time() - previous["finished"]) / 3600
             if not previous["ok"]:
                 say(f"note: the previous run failed ({previous['message']})")
+                # Only the two push failures leave a complete set of reports
+                # on disk. Matched from the start of the message on purpose:
+                # "the league build failed, nothing was published" contains the
+                # word publish too, and half a report must never reach the site.
+                if previous["message"].startswith(
+                        ("publish.sh failed", "git failed")):
+                    resume_publish = True
             if gap > STALE_HOURS:
                 say(f"note: nothing has run for {gap:.0f} hours")
+
+        # 0. Publish what is already on disk, before rebuilding anything.
+        #
+        #    A run that built every report and then lost the push has hours of
+        #    finished work sitting in reports/, and the old behaviour threw it
+        #    away and started the fetch from scratch, leaving the site a further
+        #    day behind. Yesterday's reports beat no reports.
+        #
+        #    Not fatal if it fails. The normal publish at the end gets its own
+        #    attempt with fresher data.
+        if (resume_publish and not args.dry and not args.no_push
+                and settings.get("push")):
+            stale = sorted((ROOT / "reports").glob("*.html"))
+            if stale:
+                say(f"the previous run built {len(stale)} report(s) and never "
+                    "published them, pushing those first")
+                if run(["./publish.sh"], args.dry):
+                    say("recovered, the site is serving the previous run's reports")
+                else:
+                    say("could not publish those, carrying on with the rebuild")
 
         # 1. Fetch and build. Each league is its own report, so one failing
         #    competition does not take the others down with it.
@@ -319,7 +367,7 @@ def main() -> None:
             stamp = datetime.now(timezone.utc).strftime("%d %b %Y")
             ok = (run(["git", "add", "-A"], args.dry)
                   and run(["git", "commit", "-m", f"Gameweek update {stamp}"], args.dry)
-                  and run(["git", "push"], args.dry))
+                  and run_with_retries(["git", "push"], args.dry))
             if not ok:
                 fail("git failed, the site was not updated")
             # Checked like every other step. This was the one place the return

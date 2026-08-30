@@ -66,7 +66,30 @@ git add -A
 git -c user.name="publish.sh" -c user.email="publish@local" \
     commit -q -m "Publish $(date -u '+%Y-%m-%d %H:%M UTC')"
 git remote add origin "$REMOTE"
-git push -f -q origin gh-pages
+
+# Retry the push.
+#
+# The build takes hours, the push takes seconds, so losing a whole day to a
+# thirty second network blip is the worst trade in this script. On 29 August
+# 2026 exactly that happened: the fetch layer rode out a wave of DNS errors
+# from 17:50 onwards and finished all eleven reports, then this line died on
+# "Could not resolve host: github.com" and the site sat two days stale.
+#
+# Retrying is safe because this is a force-push of a freshly built branch.
+# Repeating it either fails again or lands the same commit.
+PUSH_TRIES="${PUSH_TRIES:-5}"
+delay=10
+attempt=1
+until git push -f -q origin gh-pages; do
+  if [ "$attempt" -ge "$PUSH_TRIES" ]; then
+    echo "Push failed after ${attempt} attempts, giving up." >&2
+    exit 1
+  fi
+  echo "  push failed, retrying in ${delay}s (attempt ${attempt} of ${PUSH_TRIES})"
+  sleep "$delay"
+  attempt=$((attempt + 1))
+  delay=$((delay * 2))
+done
 
 COUNT=$(ls reports/*.html | wc -l | tr -d ' ')
 SIZE=$(du -sh reports | cut -f1)
@@ -115,21 +138,30 @@ check() {
   return 1
 }
 
-FAILED=0
-check "${BASE}/" "index" || FAILED=1
-
 # The first few reports the index links to. Names come from the staged copy,
 # so this checks the files that were actually published.
-for name in $(ls reports/*.html | head -3 | xargs -n1 basename); do
-  check "${BASE}/reports/${name}" "$name" || FAILED=1
-done
+verify_round() {
+  local failed=0
+  check "${BASE}/" "index" || failed=1
+  for name in $(ls reports/*.html | head -3 | xargs -n1 basename); do
+    check "${BASE}/reports/${name}" "$name" || failed=1
+  done
+  return "$failed"
+}
 
-if [ "$FAILED" != "0" ]; then
+# Two rounds, because Pages can still be building. One slow deploy is not a
+# reason to mark the run failed and leave yesterday's site up.
+if ! verify_round; then
   echo
-  echo "The push succeeded but the site is not serving those pages." >&2
-  echo "Pages can lag by a minute; if a retry also fails, check" >&2
-  echo "Settings > Pages is set to the gh-pages branch, root folder." >&2
-  exit 1
+  echo "Not serving yet. Waiting 60s and checking once more."
+  sleep 60
+  if ! verify_round; then
+    echo
+    echo "The push succeeded but the site is not serving those pages." >&2
+    echo "Pages can lag by a minute; if a retry also fails, check" >&2
+    echo "Settings > Pages is set to the gh-pages branch, root folder." >&2
+    exit 1
+  fi
 fi
 
 echo

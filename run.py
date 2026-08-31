@@ -11,7 +11,9 @@ Build a fixture hit-rate report.
     python run.py --leagues premier_league,championship,la_liga
 
 Add --players for per-player stats, --h2h for previous meetings,
---adjust for opponent-adjusted projections.
+--adjust for opponent-adjusted projections, --newsignings to back-fill
+a new signing's thin sample from the club he just left, --referee for the
+match official and his card averages (display only).
 
 One report can hold several fixtures with a dropdown to switch between them.
 Teams in the same league share matches, and everything is cached, so the
@@ -330,9 +332,84 @@ def match_result(event: dict) -> dict | None:
     }
 
 
+# Trips on the first sign that SofaScore is refusing, so a blocked run does
+# not keep spending its remaining goodwill on a garnish. The core build keeps
+# its own behaviour: if the refusals continue, its next real fetch raises
+# Blocked and stops things properly, exactly as it would have without this.
+_PREVIOUS_CLUB_DISABLED = False
+
+
+def _previous_club_records(team: dict, current_records: list[dict],
+                           before: float | None = None) -> list[dict]:
+    """hitrates.previous_club_form, wrapped so it can never cost the build.
+
+    This runs unattended at 7am, takes hours, and publishes at the end, so a
+    crash here would trade a whole day's report for a bonus feature. Every
+    failure - a moved endpoint, a malformed transfer date, anything - is
+    named out loud and swallowed, and the fixture goes out exactly as it
+    would have with the flag off. Blocked gets one step more than a shrug:
+    it means the site is refusing everyone, so trying again on the next
+    fixture would be hammering, and the feature switches itself off for the
+    rest of the run instead.
+    """
+    global _PREVIOUS_CLUB_DISABLED
+    if _PREVIOUS_CLUB_DISABLED:
+        return []
+    try:
+        return hitrates.previous_club_form(
+            team_id=team["id"],
+            team_name=team["name"],
+            current_records=current_records,
+            before=before,
+        )
+    except api.Blocked as exc:
+        _PREVIOUS_CLUB_DISABLED = True
+        print(f"    previous-club stats: blocked ({exc}). Feature off for "
+              f"the rest of this run; everything else continues.")
+        return []
+    except Exception as exc:
+        print(f"    previous-club stats failed for {team.get('name', '?')}: "
+              f"{type(exc).__name__}: {exc}. Continuing without them.")
+        return []
+
+
+# Same arrangement as _PREVIOUS_CLUB_DISABLED above, for the same reason:
+# this runs unattended, and a garnish must never cost the build.
+_REFEREE_DISABLED = False
+
+
+def _fixture_referee(event: dict) -> dict | None:
+    """The fixture's referee with his card averages, or None, never an error.
+
+    One request per fixture (the bare event record, cached for twelve hours),
+    parsed by hitrates.referee_card_rates. None covers both "nothing went
+    wrong but no referee has been appointed yet" - the normal case until a
+    few days before kick-off - and "something went wrong", and in either
+    case the fixture goes out exactly as it would with the flag off: the
+    payload simply has no referee key. Blocked switches the feature off for
+    the rest of the run, because retrying ninety times against a site that
+    is refusing turns a rate limit into a reputation problem.
+    """
+    global _REFEREE_DISABLED
+    if _REFEREE_DISABLED:
+        return None
+    try:
+        return hitrates.referee_card_rates(api.event_details(event["id"]))
+    except api.Blocked as exc:
+        _REFEREE_DISABLED = True
+        print(f"    referee: blocked ({exc}). Feature off for the rest of "
+              f"this run; everything else continues.")
+        return None
+    except Exception as exc:
+        print(f"    referee lookup failed for event {event.get('id', '?')}: "
+              f"{type(exc).__name__}: {exc}. Continuing without it.")
+        return None
+
+
 def build_fixture(
     event: dict, games: int, players: bool, h2h: bool = False,
     adjust: bool = False, all_stats: bool = False, tiers: bool = False,
+    newsignings: bool = False, referee: bool = False,
 ) -> dict | None:
     """Gather everything the report needs for one fixture."""
     home = event["homeTeam"]
@@ -378,8 +455,13 @@ def build_fixture(
             "tournamentId": unique_id,
         },
         "teams": [
-            {"name": home["name"], "side": "home"},
-            {"name": away["name"], "side": "away"},
+            # The id matters as much as the name. A record stores the
+            # opponent's short name while this stores the full one, so the
+            # report cannot ask "did he play against this lot" by comparing
+            # strings: "Manchester City" never equals "Man City", and fuzzy
+            # matching offered Everton as the nearest thing to Coventry City.
+            {"name": home["name"], "id": home["id"], "side": "home"},
+            {"name": away["name"], "id": away["id"], "side": "away"},
         ],
         # What actually happened, when it already has. Carried in the payload
         # so a played fixture can show whether its own projections held up,
@@ -482,9 +564,34 @@ def build_fixture(
                         f"({fallback['matches']} matches)"
                     )
 
+    # Who the referee is and how card-happy he runs. DISPLAY ONLY, by
+    # explicit agreement: head-to-head history and possession both looked
+    # informative in backtests and turned out to be noise, so referee
+    # effects get shown and measured before they are ever trusted. Nothing
+    # here feeds a line, a projection or a price. Absence is normal, not
+    # failure: appointments land days before kick-off, so a fixture a week
+    # out has no referee key at all and the page stays quiet about it,
+    # rather than dressing "not known yet" up as 0.0 cards a game.
+    if referee:
+        ref = _fixture_referee(event)
+        if ref:
+            entry["referee"] = ref
+            rate = ref.get("yellowsPerGame")
+            note = (f"{rate} yellows/game over {ref['games']} matches"
+                    if rate is not None else "no card history on record")
+            print(f"  referee: {ref['name']}, {note}")
+
     if h2h:
         h2h_records = hitrates.head_to_head(
-            event_id=event["id"], home_id=home["id"], away_id=away["id"], limit=games
+            event_id=event["id"], home_id=home["id"], away_id=away["id"],
+            limit=games,
+            # The fixture's own kickoff as the cutoff. On the live path this
+            # excludes nothing, because every previous meeting predates a
+            # match that has not kicked off - and that is exactly why it is
+            # safe to pass unconditionally. The day this function is pointed
+            # at the past, the h2h feed holds this fixture's own result, and
+            # without the cutoff it would be read back as evidence.
+            before=event.get("startTimestamp") or None,
         )
         if any(h2h_records):
             entry["h2h"] = h2h_records
@@ -515,6 +622,21 @@ def build_fixture(
             player_records, entry["playerStats"]
         )
 
+        # Previous-club stats for new signings, appended only after the stat
+        # list and the lines are settled. The ordering is deliberate: with
+        # the flag on, every number the report computes today comes out
+        # identical, and the imported records ride along as extra rows,
+        # each tagged "former_club", for the front end to draw on. Failure
+        # here must never cost the build - see _previous_club_records.
+        if newsignings:
+            for team_index, team in enumerate((home, away)):
+                extra = _previous_club_records(
+                    team, player_records[team_index],
+                    before=event.get("startTimestamp") or None,
+                )
+                if extra:
+                    player_records[team_index].extend(extra)
+
     print_summary(entry)
     return entry
 
@@ -523,11 +645,13 @@ def build(
     events: list[dict], games: int, open_browser: bool,
     players: bool, h2h: bool = False, adjust: bool = False,
     all_stats: bool = False, tiers: bool = False,
+    newsignings: bool = False, referee: bool = False,
 ) -> Path:
     fixtures = []
     for i, event in enumerate(events, start=1):
         print(f"\n[{i}/{len(events)}]", end="")
-        entry = build_fixture(event, games, players, h2h, adjust, all_stats, tiers)
+        entry = build_fixture(event, games, players, h2h, adjust, all_stats,
+                              tiers, newsignings, referee)
         if entry:
             fixtures.append(entry)
 
@@ -851,6 +975,18 @@ def main() -> None:
         help="also fetch per-player stats (one extra request per match)",
     )
     parser.add_argument(
+        "--newsignings", action="store_true",
+        help="pull a new signing's record in from the club he just left, "
+             "tagged with where it came from, so a two-appearance sample "
+             "becomes something usable (needs --players)",
+    )
+    parser.add_argument(
+        "--referee", action="store_true",
+        help="name the match referee and his card averages, one extra "
+             "request per fixture. Display only: never fed into any line, "
+             "projection or price",
+    )
+    parser.add_argument(
         "--tiers", action="store_true",
         help="split each team's record by the standard of the opposition, "
              "and project promoted fixtures from the rated side's record "
@@ -962,7 +1098,8 @@ def main_for(args) -> None:
             print(f"  {describe(event)}")
 
         build(events, args.games, not args.no_open, args.players,
-              args.h2h, args.adjust, args.all_stats, args.tiers)
+              args.h2h, args.adjust, args.all_stats, args.tiers,
+              args.newsignings, args.referee)
         return
 
     if args.team is None:
@@ -984,7 +1121,8 @@ def main_for(args) -> None:
 
     picks = parse_picks(args.pick, len(events))
     build([events[i] for i in picks], args.games, not args.no_open,
-          args.players, args.h2h, args.adjust, args.all_stats, args.tiers)
+          args.players, args.h2h, args.adjust, args.all_stats, args.tiers,
+          args.newsignings, args.referee)
 
 
 if __name__ == "__main__":

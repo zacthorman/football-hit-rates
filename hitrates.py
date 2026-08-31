@@ -368,6 +368,41 @@ def _pretty(key: str) -> str:
     return out[:1].upper() + out[1:]
 
 
+def _player_stat_values(raw: dict) -> dict[str, float]:
+    """One player's statistics block as {readable name: value}.
+
+    Shared by player_form and previous_club_form, so a player's numbers are
+    read identically whichever club they were earned at. Letting the two
+    drift apart would be the quiet way to make his imported record
+    incomparable with everyone else's.
+
+    A missing stat means zero, not "no data".
+
+    SofaScore leaves the key out entirely when a player records none of
+    something. Adrien Truffert's shots on target came back as
+    1, -, 1, 1, -, 2, -, - across eight matches. Reading the gaps as
+    unknown and averaging only the four that were there gave 1.25 a game
+    when the truth is 0.62, and every shots-on-target and tackles price in
+    the tool was built on roughly double the real number. Shots escaped it
+    because zeros are recorded there.
+
+    He played, so whatever he did not do, he did none of. Which is also why
+    the zero-fill only happens when there are values at all: an empty block
+    means he did not play, and an empty dict is how this says so.
+    """
+    values: dict[str, float] = {}
+    for key, value in raw.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        values[PLAYER_STAT_NAMES.get(key, _pretty(key))] = float(value)
+
+    if values:
+        for name in PLAYER_ZERO_FILL:
+            values.setdefault(name, 0.0)
+
+    return values
+
+
 def player_form(
     team_id: int,
     team_name: str,
@@ -429,28 +464,11 @@ def player_form(
                 departed += 1
                 continue
 
-            values = {}
-            for key, value in raw.items():
-                if not isinstance(value, (int, float)) or isinstance(value, bool):
-                    continue
-                values[PLAYER_STAT_NAMES.get(key, _pretty(key))] = float(value)
-
+            # The renaming and the zero-fill both live in the shared helper;
+            # the reasoning, Truffert included, lives on its docstring.
+            values = _player_stat_values(raw)
             if not values:
                 continue
-
-            # A missing stat means zero, not "no data".
-            #
-            # SofaScore leaves the key out entirely when a player records none
-            # of something. Adrien Truffert's shots on target came back as
-            # 1, -, 1, 1, -, 2, -, - across eight matches. Reading the gaps as
-            # unknown and averaging only the four that were there gave 1.25 a
-            # game when the truth is 0.62, and every shots-on-target and
-            # tackles price in the tool was built on roughly double the real
-            # number. Shots escaped it because zeros are recorded there.
-            #
-            # He played, so whatever he did not do, he did none of.
-            for name in PLAYER_ZERO_FILL:
-                values.setdefault(name, 0.0)
 
             person = entry.get("player", {})
             records.append(
@@ -483,6 +501,188 @@ def player_form(
             )
 
     return records
+
+
+def previous_club_form(
+    team_id: int,
+    team_name: str,
+    current_records: list[dict],
+    max_signings: int = 3,
+    max_matches: int = 6,
+    max_appearances: int = 3,
+    max_transfer_age_days: int = 365,
+    before: float | None = None,
+    verbose: bool = True,
+) -> list[dict]:
+    """A new signing's record from the club he just left, tagged as such.
+
+    A player who arrived this summer has one or two appearances here, which
+    prices nothing, and the report can only mark him "new / thin sample".
+    His last half-season exists; it is just filed under another club. This
+    pulls it in, in exactly player_form's record shape, with one addition: a
+    "former_club" dict naming the club, its id and the competition each
+    match was played in, so the front end can say where a number came from
+    instead of passing it off as form for this team.
+
+    Scale is the reason for every limit in the signature. Six leagues of
+    twenty-odd squads is thousands of players, and fetching match history
+    for all of them would add hours to a run that already takes five. So a
+    player only qualifies if he already appears in the current sample - the
+    report builds its rows from records, so a signing with no minutes yet
+    would cost fetches to feed rows nothing displays - with at most
+    `max_appearances` of them: in a 38-game sample anyone at the club since
+    last season has dozens and walks straight past that bar. The transfer
+    must also be recent, because the squad feed's previous-team list
+    remembers moves back to 2008, and a veteran's club of a decade ago is
+    trivia, not evidence; without this check an early-season 10-game sample
+    could mistake a long-serving fringe player for a signing. `max_signings`
+    then caps the spend however busy the window was, keeping the worst case
+    at max_signings * (1 + max_matches) requests a side - and usually far
+    fewer, since a previous club inside the covered leagues has its matches
+    in the permanent cache already.
+
+    The previous club itself costs nothing to find: the squad endpoint that
+    player_form already fetched carries a playerPreviousTeam list complete
+    with transfer dates, so this reads it straight back out of the cache.
+    """
+    # The raw squad payload, not team_squad(), because that helper keeps
+    # only the players list and the transfer history is a sibling key.
+    # Same path and max_age as team_squad, so within a run this is the
+    # cached copy player_form's squad check just paid for.
+    squad_json = api.get_json(f"team/{team_id}/players", max_age_hours=24) or {}
+
+    now = datetime.now(timezone.utc).timestamp()
+    window_start = now - max_transfer_age_days * 86400
+
+    # player id -> (previous club, transfer timestamp), recent moves only.
+    transfers: dict[int, tuple[dict, float]] = {}
+    for item in squad_json.get("playerPreviousTeam") or []:
+        person = item.get("player") or {}
+        prev = item.get("previousTeam") or {}
+        person_id, prev_id = person.get("id"), prev.get("id")
+        if not isinstance(person_id, int) or not isinstance(prev_id, int):
+            continue
+        # A loan return lists the club itself, and a national side is not a
+        # club: neither has a record worth importing.
+        if prev_id == team_id or prev.get("national"):
+            continue
+        try:
+            moved = datetime.fromisoformat(item.get("transferDate", "")).timestamp()
+        except (TypeError, ValueError):
+            continue
+        # A transfer dated in the future is a pre-agreed move recorded
+        # early; he is not "from" that club yet. The week of slack is for
+        # feeds that stamp the date at the window rather than the signing.
+        if not (window_start <= moved <= now + 7 * 86400):
+            continue
+        transfers[person_id] = (prev, moved)
+
+    # Who has played, and how much, in the sample as it stands.
+    apps: dict[int, int] = {}
+    minutes: dict[int, float] = {}
+    names: dict[int, str] = {}
+    for record in current_records:
+        person_id = record.get("player_id")
+        if not isinstance(person_id, int):
+            continue
+        apps[person_id] = apps.get(person_id, 0) + 1
+        minutes[person_id] = minutes.get(person_id, 0.0) + (record.get("minutes") or 0)
+        names[person_id] = record.get("player", "?")
+
+    candidates = [
+        person_id for person_id, count in apps.items()
+        if count <= max_appearances and person_id in transfers
+    ]
+    # Most minutes first: when the cap bites, it should keep the signings
+    # who are actually being picked, because those are the ones anyone
+    # will try to price.
+    candidates.sort(key=lambda person_id: -minutes.get(person_id, 0.0))
+    candidates = candidates[:max_signings]
+
+    if verbose and candidates:
+        print(f"    {team_name}: previous-club stats for "
+              f"{len(candidates)} new signing(s)")
+
+    out: list[dict] = []
+    for person_id in candidates:
+        prev, moved = transfers[person_id]
+
+        # Strictly before both the transfer and any as-of cutoff. The
+        # transfer bound keeps this to matches he was actually there for;
+        # `before` keeps a backtest honest, same contract as collect_events.
+        cutoff = moved if before is None else min(moved, before)
+
+        events = collect_events(
+            prev["id"], tournament_id=None, pages=1,
+            verbose=False, before=cutoff,
+        )[-max_matches:]
+
+        found = 0
+        for event in events:
+            lineups = api.event_lineups(event["id"])
+            if not lineups:
+                continue
+
+            for side in ("home", "away"):
+                side_team = event.get(f"{side}Team") or {}
+                # Only appearances FOR the previous club count. Their feed
+                # can also hold him lining up against them for whichever
+                # club he was at before that, and importing his numbers
+                # from a third club under this one's name would be exactly
+                # the mislabelling this field exists to prevent.
+                if side_team.get("id") != prev["id"]:
+                    continue
+                entry = next(
+                    (p for p in (lineups.get(side) or {}).get("players", [])
+                     if (p.get("player") or {}).get("id") == person_id),
+                    None,
+                )
+                if entry is None:
+                    continue
+                values = _player_stat_values(entry.get("statistics") or {})
+                if not values:
+                    continue
+
+                opponent = (
+                    event.get("awayTeam") if side == "home"
+                    else event.get("homeTeam")
+                ) or {}
+                out.append(
+                    {
+                        "player": names.get(person_id)
+                        or (entry.get("player") or {}).get("name", "?"),
+                        "player_id": person_id,
+                        "position": entry.get("position"),
+                        "started": not entry.get("substitute", False),
+                        "match_id": event["id"],
+                        "date": _match_date(event),
+                        "opponent": opponent.get("shortName")
+                        or opponent.get("name", "?"),
+                        "venue": side,
+                        "minutes": values.get("Minutes", 0),
+                        "stats": values,
+                        # The marker the whole feature hangs off. Absent on
+                        # a normal record, so the front end can read "has
+                        # former_club" as "earned elsewhere" and label it,
+                        # and an older front end that has never heard of the
+                        # key keeps ignoring these rows entirely.
+                        "former_club": {
+                            "name": prev.get("name", "?"),
+                            "id": prev["id"],
+                            "competition": event.get("tournament", {})
+                            .get("name", "?"),
+                        },
+                    }
+                )
+                found += 1
+
+        if verbose:
+            print(
+                f"      {names.get(person_id, person_id)} <- "
+                f"{prev.get('name', '?')}: {found} match(es) with stats"
+            )
+
+    return out
 
 
 def player_stat_names(
@@ -579,12 +779,64 @@ def _record_from_event(
     }
 
 
+def referee_card_rates(event_details: dict | None) -> dict | None:
+    """The referee on one match record, with his card averages, or None.
+
+    SofaScore embeds the referee straight onto the event, running totals and
+    all: yellowCards, redCards (straight), yellowRedCards (second yellows)
+    and games, the number of matches those totals cover. That makes the card
+    rate free - no per-referee endpoint, no extra request beyond the event
+    itself.
+
+    None means "no referee named on this record", and callers must keep that
+    distinct from a referee with no card history. Appointments are usually
+    published only days before kick-off, so for most of the week the honest
+    answer is "not known yet", and rendering that as 0.0 cards per game
+    would be a lie with decimals on.
+
+    The per-game figures only appear when games > 0, and games itself is
+    always carried, because 4.7 yellows a game over 3 matches and over 130
+    matches are different claims and the page has to be able to say which
+    it is making. redsPerGame counts straight reds and second yellows
+    together, which is how every card market counts them.
+    """
+    if not isinstance(event_details, dict):
+        return None
+    ref = event_details.get("referee")
+    if not isinstance(ref, dict) or not ref.get("name"):
+        return None
+
+    def _count(key: str) -> int:
+        value = ref.get(key)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    games = _count("games")
+    yellows = _count("yellowCards")
+    straight_reds = _count("redCards")
+    second_yellows = _count("yellowRedCards")
+
+    out = {
+        "name": ref["name"],
+        "id": ref.get("id") if isinstance(ref.get("id"), int) else None,
+        "country": (ref.get("country") or {}).get("name"),
+        "games": games,
+        "yellows": yellows,
+        "straightReds": straight_reds,
+        "secondYellows": second_yellows,
+    }
+    if games > 0:
+        out["yellowsPerGame"] = round(yellows / games, 2)
+        out["redsPerGame"] = round((straight_reds + second_yellows) / games, 2)
+    return out
+
+
 def head_to_head(
     event_id: int,
     home_id: int,
     away_id: int,
     limit: int = 10,
     verbose: bool = True,
+    before: float | None = None,
 ) -> list[list[dict]]:
     """Previous meetings between these two teams, as two record lists.
 
@@ -593,8 +845,48 @@ def head_to_head(
 
     No competition filter here on purpose: when these two meet in a cup, that
     is still a meeting between them, and the sample is small enough already.
+
+    `before` is the as-of cutoff, same contract as collect_events: a unix
+    timestamp, compared strictly less-than, None meaning no explicit cutoff.
+    The live path passes the fixture's own kickoff; a backtest would pass
+    the moment it is pretending to stand at.
     """
     events = api.h2h_events(event_id)
+
+    # Guard against reading the future. This feed is "meetings between these
+    # two clubs", not "meetings before this one", and the difference only
+    # bites where it can do the most damage. Built for an upcoming fixture,
+    # every meeting is already in the past and the guard changes nothing.
+    # Built against a cache refreshed after the fact - which is what a
+    # backtest does - the feed contains the very fixture being predicted,
+    # and later in the season its reverse fixture too. A head-to-head sample
+    # holding the match's own result is not evidence, it is the answer
+    # sheet, and it reports an extraordinary record that means nothing.
+    #
+    # The default is safe rather than convenient, because the caller most
+    # likely to forget `before` is a future backtest, the one caller that
+    # cannot afford it. So even when no cutoff is passed, the fixture's own
+    # kickoff caps the sample whenever the fixture appears in its own feed
+    # carrying a timestamp - in the poisoned-cache case it always does,
+    # because that is precisely what being poisoned means. And the fixture
+    # itself is dropped by id regardless, since that one needs no timestamp
+    # to be wrong.
+    cutoff = before
+    for e in events:
+        if e.get("id") == event_id and e.get("startTimestamp"):
+            own = e["startTimestamp"]
+            cutoff = own if cutoff is None else min(cutoff, own)
+            break
+    events = [e for e in events if e.get("id") != event_id]
+    if cutoff is not None:
+        dated = [e for e in events if e.get("startTimestamp", 0) < cutoff]
+        if verbose and len(dated) < len(events):
+            print(
+                f"  head to head: dropped {len(events) - len(dated)} "
+                f"meeting(s) at or after the cutoff"
+            )
+        events = dated
+
     events = [e for e in events if e.get("status", {}).get("type") == "finished"]
     events.sort(key=lambda e: e.get("startTimestamp", 0))
     events = events[-limit:]
@@ -903,11 +1195,21 @@ MIN_POOL_LINKS = 2
 # projection is trusted. Measured directly on the pair, so it means the same
 # thing for every fixture, unlike the transitive pool test.
 #
-# Four separates the real cases cleanly in the data checked so far: healthy
-# league pairings share 18 to 22, while the cross-division ones that produced
-# nonsense share 0 or 1. It is a provisional number, not a derived one, and
-# wants revisiting against settled results rather than against my judgement.
-MIN_PAIR_LINKS = 4
+# An earlier version required four, on the claim that healthy league pairings
+# share 18 to 22 opponents. They cannot: the opponent sets are built from each
+# side's last ten matches or so, so the overlap tops out around eleven, and a
+# healthy mid-season pair actually sits at 3 to 8. That figure must have been
+# counted on something other than the sets this guard sees, and the cost of
+# believing it was real: at four, a quarter of Premier League backtest bets
+# lost their projection and fell back to raw-record pricing.
+#
+# Two is the backtested number. On the corrected Premier League replay it
+# lifts model coverage from 75% to 91% of settled bets, and the bets it
+# recovers price far better under the model (said 74.7%, landed 67.7%) than
+# under the raw record they otherwise get (said 83.0% for the same 67.7%).
+# The case this guard exists for is untouched: a cross-division pair joined
+# only by a cup tie shares 0 or 1 opponents and is still rejected.
+MIN_PAIR_LINKS = 2
 
 
 def rating_pools(records_by_team: dict[int, list[dict]],

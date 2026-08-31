@@ -82,6 +82,12 @@ CSS = """
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute must always win. Without this, any element that also
+   has an author display rule (a .control-group is display:flex) ignores
+   hidden entirely: the Opposition group showed on reports with no tier data
+   behind it, which is a filter that acts on nothing. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   padding: 28px 18px 72px;
@@ -105,6 +111,7 @@ header { margin-bottom: 18px; }
 }
 h1 { font-size: 30px; font-weight: 680; margin: 0 0 5px; letter-spacing: -0.015em; }
 .kickoff { color: var(--text-secondary); font-size: 14px; }
+.referee { color: var(--text-secondary); font-size: 13px; margin-top: 2px; }
 /* Sticky, not just placed at the top. A report runs to thousands of rows, so
    a back link that scrolls away is a back link you do not have. On a phone
    that meant reaching for the browser's own back button every time.
@@ -139,7 +146,12 @@ h1 { font-size: 30px; font-weight: 680; margin: 0 0 5px; letter-spacing: -0.015e
 }
 .controls + .controls { margin-bottom: 20px; }
 
-.control-group { display: flex; align-items: center; gap: 8px; }
+/* min-width and wrapping matter more than they look. A flex item will not
+   shrink below its own content, so the fixture picker, sized to its longest
+   team name, held this bar at 503px and pushed 142px of every panel off the
+   side of a 390px phone. One dropdown made the whole site scroll sideways. */
+.control-group { display: flex; align-items: center; gap: 8px;
+                 min-width: 0; flex-wrap: wrap; }
 
 .control-label {
   font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase;
@@ -170,13 +182,15 @@ select, .num-input {
   background: var(--control-bg); color: var(--text-primary);
   border-radius: 8px; font: inherit; font-size: 14px; padding: 0 8px;
 }
+select { max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+
 .num-input {
   width: 60px; text-align: center; font-variant-numeric: tabular-nums;
 }
 
 /* --------------------------------------------------------------- tabs */
 
-.tabs { display: flex; gap: 5px; margin-bottom: 16px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 16px; }
 .tabs button {
   border: 1px solid var(--border); background: var(--control-bg);
   color: var(--text-secondary);
@@ -276,7 +290,24 @@ select, .num-input {
 
 /* ------------------------------------------------------------ players */
 
-.team-block { margin-bottom: 26px; }
+.team-block { margin-bottom: 26px; min-width: 0; }
+
+/* Home above away meant scrolling the length of a squad to compare a player
+   with the man marking him.
+
+   Side by side is not free: a squad table wants 1034px and the wrap is capped
+   at 1180px, so two of them inside the normal column would each lose 457px,
+   taking the fair and need prices off the edge. So two-up widens the page and
+   drops the sparkline and the raw sequence, which brings a table to 785px.
+   Applied from JS against the real window width rather than a media query,
+   because the decision depends on the table, not the viewport alone. */
+#players { display: grid; gap: 22px; grid-template-columns: 1fr; }
+#players.two-up { grid-template-columns: 1fr 1fr; }
+#players.two-up .team-block { margin-bottom: 0; }
+#players.two-up .pcell svg,
+#players.two-up .seq { display: none; }
+#players .board { overflow-x: auto; }
+.wrap.wide { max-width: min(1680px, calc(100vw - 40px)); }
 .team-title {
   display: flex; align-items: center; gap: 9px;
   font-size: 17px; font-weight: 680; margin: 0 0 10px;
@@ -495,6 +526,97 @@ tr.thin { opacity: 0.78; }
 
 footer { margin-top: 22px; color: var(--muted); font-size: 13px; }
 
+/* --------------------------------------------------- filter drawer */
+
+/* The resting state of the whole control area: one line that says, in plain
+   words, what the numbers on screen have been filtered by, and one button
+   that opens the panel. The line is the button, so the tap target is the
+   full width of the page rather than a small chevron. */
+.filter-bar {
+  display: flex; align-items: center; gap: 14px;
+  margin-bottom: 12px;
+}
+#filter-toggle {
+  display: flex; align-items: center; gap: 9px;
+  flex: 1 1 auto; min-width: 0; text-align: left;
+  border: 1px solid var(--border); background: var(--surface-1);
+  color: var(--text-primary); border-radius: 12px;
+  font: inherit; font-size: 13.5px; padding: 10px 14px; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+#filter-toggle:hover { background: var(--tint); }
+#filter-toggle .chev {
+  flex: none; color: var(--muted); font-size: 11px;
+  transition: transform 0.12s ease;
+}
+#filter-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+#filter-toggle .fword {
+  flex: none; font-weight: 640;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.fcount {
+  background: var(--control-active); color: var(--control-active-text);
+  border-radius: 999px; font-size: 10.5px; font-weight: 700;
+  min-width: 16px; height: 16px; line-height: 16px; text-align: center;
+  padding: 0 4px;
+}
+.fcount[hidden] { display: none; }
+#filter-summary {
+  color: var(--text-secondary); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#filter-summary .on { color: var(--team-1); font-weight: 640; }
+
+.filter-panel {
+  display: flex; flex-direction: column; gap: 14px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface-1);
+  padding: 15px 16px; margin: -4px 0 16px;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.08);
+}
+/* display:flex on the class would silently defeat the hidden attribute. */
+.filter-panel[hidden] { display: none; }
+.fgroup { display: flex; gap: 8px 20px; }
+.fgroup + .fgroup { border-top: 1px solid var(--grid); padding-top: 14px; }
+.fgroup-title {
+  flex: none; width: 62px; padding-top: 7px;
+  font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--muted); font-weight: 620;
+}
+.fgroup-body {
+  display: flex; flex-wrap: wrap; gap: 12px 22px;
+  align-items: center; flex: 1 1 auto; min-width: 0;
+}
+
+/* ------------------------------------------------------ header actions */
+
+.header-line {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px 16px; flex-wrap: wrap;
+}
+.header-actions { display: flex; gap: 7px; flex: none; padding-top: 4px; }
+.header-actions button {
+  border: 1px solid var(--border); background: var(--control-bg);
+  color: var(--text-secondary); border-radius: 8px;
+  font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
+  white-space: nowrap;
+}
+.header-actions button:hover { color: var(--text-primary); background: var(--tint); }
+#fixture-group { margin-top: 12px; }
+
+/* ------------------------------------------------------ player picks */
+
+.pick-player { border-left: 3px solid var(--team-1); }
+.tag-player {
+  display: inline-block; vertical-align: 2px;
+  margin-left: 0.45rem; padding: 0.1rem 0.45rem;
+  border-radius: 5px; border: 1px solid var(--border);
+  background: var(--tint);
+  font-size: 0.66rem; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 /* -------------------------------------------------------------- narrow */
 
 @media (max-width: 900px) {
@@ -504,6 +626,26 @@ footer { margin-top: 22px; color: var(--muted); font-size: 13px; }
 }
 
 @media (max-width: 660px) {
+  /* Full width beats a squeezed dropdown you cannot read the end of. */
+  #fixture-group { width: 100%; }
+  #fixture-group select { flex: 1 1 auto; }
+
+  /* The panel reads as a sheet: group names above their controls, not
+     beside them, and the summary keeps to its single line. */
+  .fgroup { flex-direction: column; gap: 8px; }
+  .fgroup-title { width: auto; padding-top: 0; }
+
+  /* A phone cannot fit the whole sentence. When any filter is off its
+     default, the defaults give way and the active ones keep the room,
+     wrapping if they must: nothing may filter the numbers invisibly. */
+  #filter-summary.has-active .defaults { display: none; }
+  #filter-summary.has-active { white-space: normal; }
+  .header-actions { padding-top: 0; }
+
+  /* Five tabs measure 494px and the phone is 390px. Wrapping onto two rows
+     keeps every tab visible and tappable; a sideways scroller would hide
+     "My slip" off the edge with nothing to say it was there. */
+  .tabs button { flex: 1 1 auto; padding: 10px 12px; font-size: 14px; }
   body { padding: 20px 12px 60px; font-size: 16px; }
   h1 { font-size: 24px; }
   .legend { display: none; }
@@ -616,6 +758,31 @@ function filtered(records) {
     rows = rows.filter(r => tierOf(r.opponent_id) === tier);
   }
   return rows.slice(-games);
+}
+
+/* The id of the side this team is facing, or null on a report built before
+   run.py started carrying team ids.
+
+   Matching by name was tried first and is not safe. A record stores the
+   opponent's short name while the fixture stores the full one, so "Manchester
+   City" never equals "Man City", and fuzzy matching offered Everton as the
+   closest thing to Coventry City. A wrong opponent here would silently
+   attribute one player's record against Everton to a match against Coventry,
+   which is worse than showing nothing. Ids or nothing. */
+function opponentIdFor(teamIndex, fx = DATA) {
+  const other = fx.teams[1 - teamIndex];
+  return other && other.id !== undefined && other.id !== null ? other.id : null;
+}
+
+/* Match ids in which this team faced the other one, across everything
+   fetched rather than the current Matches filter. Two sides meet twice a
+   season, so cutting that to "last 10" would usually leave nothing. */
+function meetingIds(teamIndex, fx = DATA) {
+  const oppId = opponentIdFor(teamIndex, fx);
+  if (oppId === null) return null;
+  const ids = new Set((fx.records[teamIndex] || [])
+    .filter(m => m.opponent_id === oppId).map(m => m.id));
+  return ids.size ? ids : null;
 }
 
 function hasPlayers() {
@@ -961,6 +1128,7 @@ function render() {
     boardEl.innerHTML =
       '<div class="stat-row"><div class="empty">Nothing matches these filters.</div></div>';
     updateSample();
+    updateFilterSummary();
     return;
   }
 
@@ -981,6 +1149,7 @@ function render() {
   document.getElementById("mismatch").innerHTML =
     mismatchWarning() + ratingsWarning();
   updateAll();
+  updateFilterSummary();
 }
 
 function updateSample() {
@@ -1189,6 +1358,23 @@ function probOver(line, mean, vals, ratioIn) {
   return 1 - poissonCdf(k, mean);
 }
 
+/* Shrinkage of the model's stated log-odds towards its fixed point, fitted on
+   the 4,197 settled model-priced Premier League bets the backtest produces at
+   the production window of 38 matches, 2025-10-03 to 2026-08-29. The backtest
+   said the count distributions are too narrow in the tail: bets called 90%
+   landed 81%, bets called 95% landed 84%, bets near 60% were right. This is
+   the exact mirror of calibrate() in model.py -- change one, run verify.py,
+   change the other. The slope depends on the form window (a 10-match window
+   fitted near 0.30), so refit if `games` changes in update.json. */
+const CALIBRATION_A = 0.1813;
+const CALIBRATION_B = 0.5647;
+
+function calibrate(p) {
+  p = Math.min(1 - 1e-9, Math.max(1e-9, p));
+  const z = CALIBRATION_A + CALIBRATION_B * Math.log(p / (1 - p));
+  return 1 / (1 + Math.exp(-z));
+}
+
 /* One place that turns a row into a price, so the slip, the best bets and the
    standout list cannot disagree with each other.
 
@@ -1242,8 +1428,18 @@ function priceRow(r) {
 
     const conflict = absurd || r.score > pHigh + 0.05;
 
+    // Calibration is applied last, to the quoted numbers only. The conflict
+    // checks compare the record against the model's raw ceiling, which is a
+    // question about whether the two views cohere, not about how much to
+    // trust the confident one, so they stay on the uncalibrated values and
+    // the set of bets surfaced does not change. Both p and the widened
+    // probability pass through the same monotone map, so `need` keeps its
+    // place on the pessimistic side of `fair`.
+    p = calibrate(p);
+    const pLowCal = calibrate(pLow);
+
     return {
-      p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),
+      p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLowCal)),
       expected, source: "model", conflict,
       recordFair: fairOdds(r.k / r.n), recordNeed: fairOdds(r.score),
     };
@@ -1383,15 +1579,15 @@ const PLAYER_STAT_TO_TEAM = {
   "Goals": "Goals",
 };
 
-function playerAdjustment(stat, teamIndex) {
+function playerAdjustment(stat, teamIndex, fx = DATA) {
   const teamStat = PLAYER_STAT_TO_TEAM[stat];
   if (!teamStat) return 1;
 
-  const proj = ((DATA.projection || {})["ALL"] || {})[teamStat]
-            || (DATA.tierProjection ? (DATA.tierProjection.stats || {})[teamStat] : null);
+  const proj = ((fx.projection || {})["ALL"] || {})[teamStat]
+            || (fx.tierProjection ? (fx.tierProjection.stats || {})[teamStat] : null);
   if (!proj || proj[teamIndex] === undefined) return 1;
 
-  const rows = filtered(DATA.records[teamIndex]);
+  const rows = filtered(fx.records[teamIndex]);
   const values = rows.map(r => (r.stats.ALL || {})[teamStat])
                      .filter(v => v !== undefined && v !== null);
   if (values.length < 3) return 1;
@@ -1712,6 +1908,127 @@ function scanMatchups(minSample) {
   return { found: list, combos, skipped };
 }
 
+/* ---------------------------------------------------- player best bets
+
+   Player lines alongside the team matchups. A player row is a single record
+   rather than two independent halves, so it can never be scored the way a
+   matchup is: the Wilson bound on his own appearances is all the evidence
+   there is. What earns one its place is the second, smaller record beside
+   it -- the same line counted only in matches against this exact opponent,
+   through the same match ids the players tab uses. Form and the head-to-head
+   pointing the same way is the case this exists for; when the opponent
+   record is one match old the card says so, because 1/1 dressed up as
+   certainty is worse than no column at all.
+
+   Overs only, at the suggested line, because that is how player markets are
+   quoted and the suggested line stands in for where a book would hang one.
+   Only stats with a real player market behind them are scanned, the same
+   reasoning as BETTABLE for teams: Passes and Rating stay out.
+
+   Capped at three per fixture, one row per player. A fixture carries ninety
+   players and five stats, and every appearance sample is drawn from the same
+   handful of matches, so a hundred player rows would not be a hundred pieces
+   of evidence, just the same ten matches wearing different shirts. Three
+   against ten team picks keeps them from swamping the list while still
+   surfacing the case above. Pricing goes through pricePlayer, the same
+   minutes-aware path as the Players tab, never the team model. */
+
+const PLAYER_SCAN_CAP = 3;
+
+function scanPlayerBets(minSample) {
+  const found = [];
+
+  scanFixtures().forEach(([fx, fxIndex]) => {
+    if (!Array.isArray(fx.players) || !fx.players.some(r => r.length)) return;
+    const now = Date.now() / 1000;
+    if (scanScope !== "fixture" && !showPast
+        && (fx.fixture.kickoff || 0) <= now) return;
+
+    const fxRows = [];
+
+    fx.players.forEach((records, teamIndex) => {
+      // The same match window the team scan uses, venue pooled: a player's
+      // ten-appearance sample does not survive being halved by venue.
+      const allowed = new Set(fx.records[teamIndex].slice(-games).map(m => m.id));
+      const meetings = meetingIds(teamIndex, fx);
+
+      (fx.playerStats || []).forEach(stat => {
+        if (!PLAYER_STAT_TO_TEAM[stat]) return;
+        const line = (fx.playerLines || {})[stat];
+        if (line === undefined) return;
+
+        const adjustment = playerAdjustment(stat, teamIndex, fx);
+
+        const byPlayer = new Map();
+        records.forEach(r => {
+          if (!allowed.has(r.match_id)) return;
+          if (!byPlayer.has(r.player)) byPlayer.set(r.player, []);
+          byPlayer.get(r.player).push(r);
+        });
+
+        byPlayer.forEach((played, name) => {
+          const apps = appearances(played, stat);
+          if (apps.length < minSample) return;
+          const vals = apps.map(a => a.value);
+          const hits = vals.filter(v => v > line).length;
+          if (hits / vals.length < MATCHUP_FLOOR) return;
+
+          let vs = null;
+          if (meetings) {
+            const vsApps = appearances(
+              played.filter(g => meetings.has(g.match_id)), stat);
+            if (vsApps.length) {
+              vs = { k: vsApps.filter(a => a.value > line).length,
+                     n: vsApps.length };
+            }
+          }
+
+          const price = pricePlayer(apps, line, true, adjustment);
+          if (!isFinite(price.fair)) return;
+
+          fxRows.push({
+            score: wilsonLow(hits, vals.length),
+            k: hits, n: vals.length, over: true, line,
+            stat, period: "ALL",
+            player: name, position: played[0].position || "",
+            fixture: `${fx.fixture.home} v ${fx.fixture.away}`,
+            fixtureIndex: fxIndex,
+            competition: fx.fixture.competition,
+            kickoff: fx.fixture.kickoff || 0,
+            team: fx.teams[teamIndex].name,
+            teamIndex,
+            opponent: fx.teams[1 - teamIndex].name,
+            forVals: vals, vals,
+            chance: binomTail(vals.length, hits),
+            vs,
+            vsAgrees: vs ? vs.k / vs.n >= MATCHUP_FLOOR : null,
+            price,
+          });
+        });
+      });
+    });
+
+    // One row per player, confirmed head-to-heads first, then evidence. A
+    // versus-opponent record only counts as confirmation on more than one
+    // meeting, and only when the meetings themselves point the right way.
+    const confirmed = r => (r.vsAgrees === true && r.vs.n > 1) ? 1 : 0;
+    const bestByPlayer = new Map();
+    fxRows.forEach(r => {
+      const held = bestByPlayer.get(r.player);
+      if (!held
+          || confirmed(r) > confirmed(held)
+          || (confirmed(r) === confirmed(held) && r.score > held.score)) {
+        bestByPlayer.set(r.player, r);
+      }
+    });
+    const ranked = [...bestByPlayer.values()].sort((a, b) =>
+      (confirmed(b) - confirmed(a)) || (b.score - a.score));
+    found.push(...ranked.slice(0, PLAYER_SCAN_CAP));
+  });
+
+  return found;
+}
+
 /* ----------------------------------------------------- recommended slip
 
    One suggested multiple per fixture: the fewest, best-evidenced legs whose
@@ -1789,7 +2106,8 @@ function recommendedSlip() {
   const combined = legs.reduce((acc, r) => acc * (r.price || priceRow(r)).fair, 1);
   const rows = legs.map(r => {
     const pr = r.price || priceRow(r);
-    return `<li>${escapeHtml(r.team)} ${r.over ? "over" : "under"} ${r.line}
+    return `<li>${escapeHtml(r.player ? r.player + " (" + r.team + ")" : r.team)}
+      ${r.over ? "over" : "under"} ${r.line}
       ${escapeHtml(r.stat.toLowerCase())}
       ${r.period !== "ALL" ? `(${escapeHtml((ALL.periods || {})[r.period] || r.period)})` : ""}
       &mdash; <strong>${fmtOdds(pr.fair)}</strong> fair,
@@ -1823,6 +2141,12 @@ function bestBetsView() {
   MATCHUP_FLOOR = Math.min(1, Math.max(0.3,
     (parseInt(document.getElementById("bfloor").value, 10) || 50) / 100));
   let { found, combos, skipped } = scanMatchups(minSample);
+
+  // Player rows ride along in the same pool, already priced through
+  // pricePlayer. The sort is stable, so among equal scores the team scan's
+  // own tiebreaks survive the merge.
+  found = found.concat(scanPlayerBets(minSample))
+               .sort((a, b) => b.score - a.score);
 
   const periodName = p => (ALL.periods && ALL.periods[p]) || p;
   const target = document.getElementById("bestbets");
@@ -1878,8 +2202,82 @@ function bestBetsView() {
     const picks = rows.slice(0, limit);
     const cards = picks.map(r => {
       const i = shown.push(r) - 1;
-      const price = priceRow(r);
+      // A player row keeps the price the scan gave it. Sending it through
+      // priceRow would price a player's shots off the team's expectation,
+      // which is exactly the bug the custom builder already guards against.
+      const price = r.player ? r.price : priceRow(r);
       r.price = price;                      // the slip reads this back
+
+      if (r.player) {
+        const fmtV = v => (Number.isInteger(v) ? v : v.toFixed(1));
+        let vsHalf;
+        if (r.vs) {
+          const small = r.vs.n < 3;
+          vsHalf = `<div class="half">
+            <span class="half-label">v ${escapeHtml(r.opponent)}, all meetings</span>
+            <span class="half-num">${r.vs.k}/${r.vs.n}</span>
+            <div class="bar"><div class="fill" style="width:${(r.vs.k / r.vs.n) * 100}%;
+                 background:var(${VARS[r.teamIndex]})"></div></div>
+            <span class="seq">${small
+              ? `only ${r.vs.n} meeting${r.vs.n === 1 ? "" : "s"} with player data`
+              : ""}</span>
+          </div>`;
+        } else {
+          vsHalf = `<div class="half">
+            <span class="half-label">v ${escapeHtml(r.opponent)}</span>
+            <span class="half-num">&mdash;</span>
+            <span class="seq">no meetings with player data in this report</span>
+          </div>`;
+        }
+
+        const agreeLine = r.vs
+          ? (r.vsAgrees
+              ? `<div class="agree yes">Record v ${escapeHtml(r.opponent)}
+                   agrees (${r.vs.k}/${r.vs.n}${r.vs.n < 3 ? ", small sample" : ""})</div>`
+              : `<div class="agree no">Record v ${escapeHtml(r.opponent)}
+                   disagrees (${r.vs.k}/${r.vs.n})</div>`)
+          : "";
+
+        return `<div class="pick pick-player" data-best="${i}">
+          <div class="pick-head">
+            <div class="pick-line">${escapeHtml(r.player)} over ${r.line}
+              ${escapeHtml(r.stat.toLowerCase())}
+              <span class="tag-player">player &middot; ${escapeHtml(r.team)}</span>
+              <span class="pos">${periodName(r.period)}</span></div>
+            <div class="pick-fixture">${escapeHtml(r.fixture)}</div>
+          </div>
+
+          <div class="pick-halves">
+            <div class="half">
+              <span class="half-label">Last ${r.n} appearances</span>
+              <span class="half-num">${r.k}/${r.n}</span>
+              <div class="bar"><div class="fill" style="width:${(r.k / r.n) * 100}%;
+                   background:var(${VARS[r.teamIndex]})"></div></div>
+              <span class="seq">${r.vals.map(fmtV).join(", ")}</span>
+            </div>
+            ${vsHalf}
+          </div>
+
+          <div class="pick-foot">
+            <span><b>${r.k}/${r.n}</b> in form</span>
+            <span>fair <b>${fmtOdds(price.fair)}</b></span>
+            <span class="need-cell">need <b>${fmtOdds(price.need)}</b>
+              ${price.source === "model"
+                ? `<span class="src" title="${price.per90.toFixed(2)} per 90 over ` +
+                  `${price.expectedMinutes} expected minutes, adjusted for the matchup, ` +
+                  `priced through the same path as the Players tab.">` +
+                  `${price.expected.toFixed(1)}&nbsp;exp</span>`
+                : `<span class="src warnsrc" title="Too little data for the minutes ` +
+                  `model, so this is the record-only interval.">record only</span>`}
+            </span>
+            <span class="chance">${fmtChance(r.chance)} by chance</span>
+            ${agreeLine}
+            <button type="button" class="add-btn" data-badd="${i}"
+              data-in="${SLIP.some(s => s.key === rowKey(r)) ? 1 : 0}">
+              ${SLIP.some(s => s.key === rowKey(r)) ? "Added" : "Add"}</button>
+          </div>
+        </div>`;
+      }
       const fair = price.fair;
       const need = price.need;
       const dir = r.over ? "over" : "under";
@@ -1961,6 +2359,15 @@ function bestBetsView() {
       record twice as long, because they can fail independently. Both halves
       must clear ${Math.round(MATCHUP_FLOOR * 100)}% on their own before a
       pairing is scored at all, so a 10/10 cannot drag a 3/10 into the list.
+      ${found.some(r => r.player) ? `<br><br><strong>Player rows.</strong>
+      The picks marked "player" are one record, not two: a single player's
+      own appearances, priced through the same per-90 minutes model as the
+      Players tab. Where the data allows it, the card also shows his record
+      at this line against this exact opponent; the form record and the
+      head-to-head agreeing is the strongest signal these rows carry, and the
+      number of meetings is printed beside it because 1/1 is one match, not a
+      pattern. At most ${PLAYER_SCAN_CAP} player rows per fixture are let in,
+      so they cannot swamp the team matchups.` : ""}
       <br><br>
       <strong>What it is not.</strong> This scan looked at
       <strong>${combos}</strong> combinations, and
@@ -2558,17 +2965,40 @@ function playerView() {
   const line = parseFloat(document.getElementById("pline").value) || 0;
   const minApps = parseInt(document.getElementById("pmin").value, 10) || 1;
 
+  // Honour the Team control, the same Both/Home/Away buttons the team tab
+  // already obeys. Rendering both squads regardless was the reason picking a
+  // team did nothing here and you still had to scroll past the other one.
+  const shown = focusedIndexes();
+
   const blocks = DATA.players.map((records, teamIndex) => {
+    if (!shown.includes(teamIndex)) return "";
+
     // Scope player rows to exactly the matches the team filters are showing,
     // so "last 5, home only" means the same thing on both tabs.
-    const allowed = new Set(filtered(DATA.records[teamIndex]).map(m => m.id));
-    const rows = records.filter(r => allowed.has(r.match_id));
+    // activeRecords, not DATA.records, so the Sample control reaches this tab.
+    // On head to head that leaves the meetings both sides have player numbers
+    // for, which is what "how did he do against this lot" actually means.
+    const allowed = new Set(filtered(activeRecords()[teamIndex]).map(m => m.id));
+    // Former-club rows come from another team's matches, so their match ids
+    // are not in `allowed` and never can be. They are admitted separately,
+    // and only where the filters above still mean something: never on head to
+    // head, which is a question about these two clubs; never under an
+    // Opposition tier filter, which is fitted to this division and cannot
+    // classify another league's sides; and only for the venue being asked
+    // about. Anything else would quietly show numbers the filters exclude.
+    const importsOk = source !== "h2h" && tier === "all";
+    const rows = records.filter(r =>
+      allowed.has(r.match_id)
+      || (importsOk && r.former_club && (venue === "all" || r.venue === venue)));
 
     const byPlayer = new Map();
     for (const r of rows) {
       if (!byPlayer.has(r.player)) byPlayer.set(r.player, []);
       byPlayer.get(r.player).push(r);
     }
+
+    const meetings = source === "h2h" ? null : meetingIds(teamIndex);
+    const oppName = DATA.teams[1 - teamIndex].name;
 
     const colorVar = VARS[teamIndex];
     const title = `<h2 class="team-title">
@@ -2600,8 +3030,31 @@ function playerView() {
       const pct = Math.round((hits / vals.length) * 100);
       const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       const missed = played.length - apps.length;
+
+      // The same line, against this opponent only. Two shots in his last two
+      // against them, on top of the form record, is the case that made this
+      // worth a column of its own.
+      let vs = null;
+      if (meetings) {
+        const vsApps = appearances(
+          played.filter(g => meetings.has(g.match_id)), stat);
+        if (vsApps.length) {
+          vs = { k: vsApps.filter(a => a.value > line).length, n: vsApps.length };
+        }
+      }
+
+      // Where the sample came from. A signing's record at his old club is
+      // worth seeing, but it is background rather than form for this side:
+      // different team, different role, different service. It must never sit
+      // on the page looking like he did it here.
+      const imported = played.filter(g => g.former_club);
+      const from = imported.length
+        ? [...new Set(imported.map(g => g.former_club.name))].join(", ")
+        : null;
+
       return { name, pos: played[0].position || "", played, apps, vals,
-               hits, pct, avg, missed, thin };
+               hits, pct, avg, missed, thin, vs,
+               imported: imported.length, from };
     }).filter(Boolean);
 
     // Well-evidenced players first, then the thin ones. A single appearance
@@ -2641,6 +3094,13 @@ function playerView() {
                 p.vals.length === 1 ? "" : "s"} in this sample: probably a new
                 signing or returning from injury. The rate may be real, but one
                 or two matches cannot tell you.">new / thin sample</span>`
+            : ""}${
+          p.from
+            ? `<span class="tag-thin" title="${p.imported} of these ${
+                p.vals.length} appearances were for ${p.from} before he signed.
+                Different side, different role, different service: treat it as
+                background rather than form for this team.">incl. ${
+                p.imported} at ${p.from}</span>`
             : ""}</td>
         <td class="num" data-label="Apps">${p.vals.length}</td>
         <td class="num" data-label="Avg">${p.avg.toFixed(1)}
@@ -2658,6 +3118,10 @@ function playerView() {
             <span class="seq">${p.vals.map(fmt).join(", ")}</span>
           </div>
         </td>
+        ${meetings ? `<td class="num" data-label="v ${oppName}">${
+          p.vs
+            ? `<b>${p.vs.k}/${p.vs.n}</b>`
+            : `<span class="pos">not met</span>`}</td>` : ""}
         <td class="odds" data-label="Fair">${fmtOdds(price.fair)}</td>
         <td class="odds odds-min" data-label="Need">${fmtOdds(price.need)}
           ${price.source === "model"
@@ -2677,6 +3141,9 @@ function playerView() {
       <div class="board"><table class="ptable">
         <thead><tr>
           <th>Player</th><th>Apps</th><th>Avg</th><th>${stat} over ${line}</th>
+          ${meetings ? `<th title="The same line, counting only matches against
+            ${oppName}. Drawn from every match fetched, not the Matches filter,
+            because two sides usually meet twice a season.">v ${oppName}</th>` : ""}
           <th title="Price implied by the record and the model">Fair</th>
           <th title="Price the evidence supports">Need</th><th></th>
         </tr></thead>
@@ -2685,8 +3152,25 @@ function playerView() {
     </div>`;
   });
 
-  document.getElementById("players").innerHTML = blocks.join("");
+  const panel = document.getElementById("players");
+  const note = document.getElementById("pnote");
+  if (note) {
+    note.hidden = source !== "h2h";
+    note.textContent = source === "h2h"
+      ? "Head to head: only previous meetings that fall inside the matches "
+        + "fetched for each side carry player numbers, so this sample is "
+        + "smaller than the team head to head above."
+      : "";
+  }
+  const roomy = shown.length === 2 && window.innerWidth >= TWO_UP_MIN;
+  panel.classList.toggle("two-up", roomy);
+  document.querySelector(".wrap").classList.toggle("wide", roomy);
+  panel.innerHTML = blocks.join("");
 }
+
+/* Two trimmed tables need about 1590px plus margins. Below that the squads
+   stack and the Team control above does the work instead. */
+const TWO_UP_MIN = 1640;
 
 function fillPlayerStats() {
   const select = document.getElementById("pstat");
@@ -2789,6 +3273,32 @@ function applyFixture() {
   document.getElementById("title").textContent =
     `${DATA.fixture.home} v ${DATA.fixture.away}`;
   document.getElementById("kickoff").textContent = DATA.fixture.date || "";
+
+  // Referee line. DATA.referee is absent until an official is appointed,
+  // which is normal for most of the week: say nothing rather than print
+  // zeros, because a zero here reads as "a referee who gives no cards".
+  // Display only. These numbers feed no line, price or projection anywhere,
+  // by agreement: head to head and possession both looked informative and
+  // measured as noise, so a referee effect gets shown before it is trusted.
+  const refEl = document.getElementById("referee");
+  if (refEl) {
+    const ref = DATA.referee;
+    if (ref && ref.name) {
+      let text = "Referee: " + ref.name;
+      if (ref.yellowsPerGame != null) {
+        text += " \u00b7 " + ref.yellowsPerGame.toFixed(2) + " yellows and "
+              + ref.redsPerGame.toFixed(2) + " reds per game over "
+              + ref.games + " matches";
+        if (ref.games < 10) text += " (small sample)";
+      } else {
+        text += " \u00b7 no card history on record";
+      }
+      refEl.textContent = text;
+      refEl.hidden = false;
+    } else {
+      refEl.hidden = true;
+    }
+  }
   document.getElementById("legend-0").textContent = DATA.teams[0].name;
   document.getElementById("legend-1").textContent = DATA.teams[1].name;
   document.getElementById("focus-0").textContent = DATA.teams[0].name;
@@ -2809,6 +3319,7 @@ function switchTab(target) {
   document.querySelectorAll(".panel").forEach(p =>
     p.hidden = p.dataset.panel !== target);
   if (target === "players") playerView();
+  else document.querySelector(".wrap").classList.remove("wide");
   if (target === "standout") standoutView();
   if (target === "best") bestBetsView();
   if (target === "slip") slipView();
@@ -2900,9 +3411,9 @@ document.getElementById("bfloor").addEventListener("input", () => {
 segment("tier", v => { tier = v; render(); if (tab === "players") playerView(); });
 segment("venue", v => { venue = v; render(); if (tab === "players") playerView(); });
 segment("period", v => { period = v; render(); });
-segment("source", v => { source = v; render(); });
+segment("source", v => { source = v; render(); if (tab === "players") playerView(); });
 segment("measure", v => { measure = v; render(); });
-segment("focus", v => { focus = v; render(); });
+segment("focus", v => { focus = v; render(); if (tab === "players") playerView(); });
 segment("scope", v => { scope = v; render(); });
 segment("sort", v => { sort = v; render(); });
 
@@ -3062,6 +3573,12 @@ function playerViewSoon() {
   clearTimeout(playerTimer);
   playerTimer = setTimeout(playerView, 120);
 }
+
+// Dragging a window across the threshold, or turning a phone, should re-lay
+// the squads rather than leaving two clipped tables on screen.
+window.addEventListener("resize", () => {
+  if (tab === "players") playerViewSoon();
+});
 
 const pstat = document.getElementById("pstat");
 pstat.addEventListener("change", () => {
@@ -3271,6 +3788,80 @@ document.getElementById("standout").addEventListener("input", e => {
   }
 });
 
+/* -------------------------------------------------------- filter drawer
+
+   At rest the whole control area is one line: a plain-words summary of
+   every active filter, which is itself the button that opens the panel.
+   The panel holds every control, grouped by what it does. Sample decides
+   which matches count; View decides how they are read.
+
+   Closed must never mean silently active. Anything off its default is
+   named in the line, highlighted, and named FIRST, so the ellipsis on a
+   narrow phone can only ever eat the defaults. The count on the Filters
+   word backs it up: it survives any truncation. */
+
+const filterToggle = document.getElementById("filter-toggle");
+const filterPanel = document.getElementById("filter-panel");
+
+function setFiltersOpen(open) {
+  filterPanel.hidden = !open;
+  filterToggle.setAttribute("aria-expanded", String(open));
+  try { sessionStorage.setItem("filtersOpen", open ? "1" : "0"); } catch (e) {}
+}
+
+filterToggle.addEventListener("click", () => setFiltersOpen(filterPanel.hidden));
+
+// Reopening on return is a session convenience; closed is the resting state.
+try {
+  if (sessionStorage.getItem("filtersOpen") === "1") setFiltersOpen(true);
+} catch (e) {}
+
+function filterSummaryParts() {
+  const parts = [];
+  const push = (text, on) => parts.push({ text, on: !!on });
+
+  if (source === "h2h") push("Head to head", true);
+  push(games >= 99 ? "All matches" : "Last " + games, games !== 10);
+  push(venue === "all" ? "All venues"
+     : venue === "home" ? "Home only" : "Away only", venue !== "all");
+  if (tier !== "all") {
+    const b = document.querySelector(`[data-tier="${tier}"]`);
+    push("vs " + (b ? b.textContent : tier), true);
+  }
+  push(period === "ALL" ? "Full match"
+     : period === "1ST" ? "First half" : "Second half", period !== "ALL");
+  if (focus === "both") push("Both teams", false);
+  else push(escapeHtml((DATA.teams[+focus] || {}).name || "One team") + " only", true);
+  if (measure !== "for") push(measure === "against" ? "Against" : "Matchup", true);
+  push(scope === "core" ? "Main stats" : "All stats", scope !== "core");
+  if (sort !== "default") push("Strongest first", true);
+  if (strongOnly) push("Strong only", true);
+  return parts;
+}
+
+function updateFilterSummary() {
+  const el = document.getElementById("filter-summary");
+  if (!el) return;
+  const parts = filterSummaryParts();
+  const on = parts.filter(p => p.on);
+  const off = parts.filter(p => !p.on);
+  const onHtml = on.map(p => `<span class="on">${p.text}</span>`).join(" \u00b7 ");
+  const offHtml = off.map(p => p.text).join(" \u00b7 ");
+  // The defaults are wrapped so a narrow screen can drop them: when space
+  // runs out, what survives must be the filters that are actually biting.
+  el.classList.toggle("has-active", on.length > 0);
+  el.innerHTML = onHtml
+    + (off.length ? `<span class="defaults">${on.length ? " \u00b7 " : ""}${offHtml}</span>` : "");
+
+  const count = document.getElementById("filter-count");
+  if (count) {
+    count.textContent = on.length ? String(on.length) : "";
+    count.hidden = !on.length;
+  }
+}
+
+updateFilterSummary();
+
 applyFixture();
 """
 
@@ -3299,115 +3890,141 @@ def build_html(payload: dict) -> str:
 <div class="back-bar"><a class="back" href="../index.html">&lsaquo;&nbsp; All fixtures</a></div>
 
 <header>
-  <div class="competition" id="competition">{fixture.get('competition', 'Football')}</div>
-  <h1 id="title">{fixture['home']} v {fixture['away']}</h1>
-  <div class="kickoff" id="kickoff">{fixture.get('date', '')}</div>
-</header>
-
-<div class="controls">
+  <div class="header-line">
+    <div class="header-id">
+      <div class="competition" id="competition">{fixture.get('competition', 'Football')}</div>
+      <h1 id="title">{fixture['home']} v {fixture['away']}</h1>
+      <div class="kickoff" id="kickoff">{fixture.get('date', '')}</div>
+      <div class="referee" id="referee" hidden></div>
+    </div>
+    <!-- Actions, not filters. Reset rewrites the lines and Theme repaints
+         the page; neither changes which matches are counted, so neither
+         belongs in the filter panel. -->
+    <div class="header-actions">
+      <button type="button" id="reset" title="Put every line back to its suggested value">Reset lines</button>
+      <button type="button" id="theme">Theme</button>
+    </div>
+  </div>
+  <!-- Navigation, not a filter: picking a fixture swaps the whole page,
+       title and all, so it lives with the page identity. -->
   <div class="control-group" id="fixture-group">
     <span class="control-label">Fixture</span>
     <select id="fixture"></select>
     <div class="seg"><button type="button" id="show-past" aria-pressed="false">All upcoming</button></div>
   </div>
+</header>
 
-  <div class="control-group">
-    <span class="control-label">Matches</span>
-    <div class="seg">
-      <button type="button" data-games="5" aria-pressed="false">5</button>
-      <button type="button" data-games="10" aria-pressed="true">10</button>
-      <button type="button" data-games="99" aria-pressed="false">All</button>
-    </div>
-  </div>
-
-  <div class="control-group">
-    <span class="control-label">Venue</span>
-    <div class="seg">
-      <button type="button" data-venue="all" aria-pressed="true">All</button>
-      <button type="button" data-venue="home" aria-pressed="false">Home</button>
-      <button type="button" data-venue="away" aria-pressed="false">Away</button>
-    </div>
-  </div>
-
-  <div class="control-group" id="tier-group" hidden>
-    <span class="control-label">Opposition</span>
-    <div class="seg">
-      <button type="button" data-tier="all" aria-pressed="true">All</button>
-      <button type="button" data-tier="top" aria-pressed="false"
-              title="Sides that finished in the top six last season">Top 6</button>
-      <button type="button" data-tier="upper" aria-pressed="false"
-              title="Finished 7th to 11th last season">Upper</button>
-      <button type="button" data-tier="lower" aria-pressed="false"
-              title="Finished 12th to 17th last season">Lower</button>
-      <button type="button" data-tier="bottom" aria-pressed="false"
-              title="Finished 18th or below, plus every promoted side">Bottom</button>
-    </div>
-  </div>
-
-  <div class="control-group">
-    <span class="control-label">Period</span>
-    <div class="seg">
-      <button type="button" data-period="ALL" aria-pressed="true">Full</button>
-      <button type="button" data-period="1ST" aria-pressed="false">1st</button>
-      <button type="button" data-period="2ND" aria-pressed="false">2nd</button>
-    </div>
-  </div>
-
+<div class="filter-bar">
+  <button type="button" id="filter-toggle" aria-expanded="false" aria-controls="filter-panel">
+    <span class="chev" aria-hidden="true">&#9656;</span>
+    <span class="fword">Filters<span class="fcount" id="filter-count" hidden></span></span>
+    <span id="filter-summary"></span>
+  </button>
   <div class="legend">
     <span class="legend-item"><span class="swatch" style="background:var(--team-1)"></span><span id="legend-0">{names[0]}</span></span>
     <span class="legend-item"><span class="swatch" style="background:var(--team-2)"></span><span id="legend-1">{names[1]}</span></span>
   </div>
 </div>
 
-<div class="controls">
-  <div class="control-group">
-    <span class="control-label">Sample</span>
-    <div class="seg">
-      <button type="button" data-source="form" aria-pressed="true">Recent form</button>
-      <button type="button" data-source="h2h" aria-pressed="false">Head to head</button>
+<div class="filter-panel" id="filter-panel" hidden>
+  <div class="fgroup">
+    <div class="fgroup-title">Sample</div>
+    <div class="fgroup-body">
+      <div class="control-group">
+        <span class="control-label">Based on</span>
+        <div class="seg">
+          <button type="button" data-source="form" aria-pressed="true">Recent form</button>
+          <button type="button" data-source="h2h" aria-pressed="false">Head to head</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <span class="control-label">Matches</span>
+        <div class="seg">
+          <button type="button" data-games="5" aria-pressed="false">5</button>
+          <button type="button" data-games="10" aria-pressed="true">10</button>
+          <button type="button" data-games="99" aria-pressed="false">All</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <span class="control-label">Venue</span>
+        <div class="seg">
+          <button type="button" data-venue="all" aria-pressed="true">All</button>
+          <button type="button" data-venue="home" aria-pressed="false">Home</button>
+          <button type="button" data-venue="away" aria-pressed="false">Away</button>
+        </div>
+      </div>
+
+      <div class="control-group" id="tier-group" hidden>
+        <span class="control-label">Opposition</span>
+        <div class="seg">
+          <button type="button" data-tier="all" aria-pressed="true">All</button>
+          <button type="button" data-tier="top" aria-pressed="false"
+                  title="Sides that finished in the top six last season">Top 6</button>
+          <button type="button" data-tier="upper" aria-pressed="false"
+                  title="Finished 7th to 11th last season">Upper</button>
+          <button type="button" data-tier="lower" aria-pressed="false"
+                  title="Finished 12th to 17th last season">Lower</button>
+          <button type="button" data-tier="bottom" aria-pressed="false"
+                  title="Finished 18th or below, plus every promoted side">Bottom</button>
+        </div>
+      </div>
     </div>
   </div>
 
-  <div class="control-group">
-    <span class="control-label">Team</span>
-    <div class="seg">
-      <button type="button" data-focus="both" aria-pressed="true">Both</button>
-      <button type="button" data-focus="0" aria-pressed="false" id="focus-0">Home</button>
-      <button type="button" data-focus="1" aria-pressed="false" id="focus-1">Away</button>
-    </div>
-  </div>
+  <div class="fgroup">
+    <div class="fgroup-title">View</div>
+    <div class="fgroup-body">
+      <div class="control-group">
+        <span class="control-label">Team</span>
+        <div class="seg">
+          <button type="button" data-focus="both" aria-pressed="true">Both</button>
+          <button type="button" data-focus="0" aria-pressed="false" id="focus-0">Home</button>
+          <button type="button" data-focus="1" aria-pressed="false" id="focus-1">Away</button>
+        </div>
+      </div>
 
-  <div class="control-group">
-    <span class="control-label">Measure</span>
-    <div class="seg">
-      <button type="button" data-measure="for" aria-pressed="true">For</button>
-      <button type="button" data-measure="against" aria-pressed="false">Against</button>
-      <button type="button" data-measure="matchup" aria-pressed="false">Matchup</button>
-    </div>
-  </div>
+      <div class="control-group">
+        <span class="control-label">Measure</span>
+        <div class="seg">
+          <button type="button" data-measure="for" aria-pressed="true">For</button>
+          <button type="button" data-measure="against" aria-pressed="false">Against</button>
+          <button type="button" data-measure="matchup" aria-pressed="false">Matchup</button>
+        </div>
+      </div>
 
-  <div class="control-group">
-    <span class="control-label">Stats</span>
-    <div class="seg">
-      <button type="button" data-scope="core" aria-pressed="true">Main</button>
-      <button type="button" data-scope="all" aria-pressed="false">All</button>
-    </div>
-  </div>
+      <div class="control-group">
+        <span class="control-label">Period</span>
+        <div class="seg">
+          <button type="button" data-period="ALL" aria-pressed="true">Full</button>
+          <button type="button" data-period="1ST" aria-pressed="false">1st</button>
+          <button type="button" data-period="2ND" aria-pressed="false">2nd</button>
+        </div>
+      </div>
 
-  <div class="control-group">
-    <span class="control-label">Order</span>
-    <div class="seg">
-      <button type="button" data-sort="default" aria-pressed="true">Standard</button>
-      <button type="button" data-sort="strongest" aria-pressed="false">Strongest first</button>
-    </div>
-  </div>
+      <div class="control-group">
+        <span class="control-label">Stats</span>
+        <div class="seg">
+          <button type="button" data-scope="core" aria-pressed="true">Main</button>
+          <button type="button" data-scope="all" aria-pressed="false">All</button>
+        </div>
+      </div>
 
-  <div class="control-group">
-    <div class="seg">
-      <button type="button" id="strong-only" aria-pressed="false"
-              title="Only stats where a team is at 80% or above, or 20% or below">Strong only</button>
-      <button type="button" id="reset" title="Put every line back to its suggested value">Reset lines</button>
-      <button type="button" id="theme">Theme</button>
+      <div class="control-group">
+        <span class="control-label">Order</span>
+        <div class="seg">
+          <button type="button" data-sort="default" aria-pressed="true">Standard</button>
+          <button type="button" data-sort="strongest" aria-pressed="false">Strongest first</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <div class="seg">
+          <button type="button" id="strong-only" aria-pressed="false"
+                  title="Only stats where a team is at 80% or above, or 20% or below">Strong only</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -3450,6 +4067,7 @@ def build_html(payload: dict) -> str:
     void rather than lost. Prices come from a rate per 90 multiplied by the
     minutes they are likely to get.
   </p>
+  <p class="note" id="pnote" hidden></p>
   <div id="players"></div>
 </div>
 

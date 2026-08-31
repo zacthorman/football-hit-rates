@@ -49,6 +49,49 @@ def wilson_low(hits: int, total: int, z: float = 1.96) -> float:
     return max(0.0, (centre - spread) / denom)
 
 
+# Shrinkage of the model's stated log-odds towards its fixed point, fitted by
+# logistic regression of outcome on log-odds over the 4,197 settled
+# model-priced Premier League bets the backtest produces at the production
+# window of 38 matches, 2025-10-03 to 2026-08-29. The slope depends on the
+# window: a 10-match window fitted near 0.30, so these numbers are only valid
+# for the window they were fitted at and must be refitted if `games` changes
+# in update.json.
+CALIBRATION_A = 0.1813
+CALIBRATION_B = 0.5647
+
+
+def calibrate(p: float) -> float:
+    """The stated probability, shrunk to what bets stated like it landed at.
+
+    The backtest settles every bet the tool would have surfaced, and at the
+    production window its verdict was consistent: bets called 90% landed 81%,
+    bets called 95% landed 84%, while bets near 60% landed roughly as stated.
+    The count distributions are too narrow in the tail, and no tweak to the
+    dispersion machinery reproduced that exact shape. Inflating the variance
+    directly was tried and repairs the top buckets only by over-correcting
+    the bottom ones, and transfers worse: on the Championship, which the fit
+    never saw, variance inflation left the 88-93% bucket eight points
+    optimistic where this correction leaves it two.
+
+    So the correction goes on the stated probability itself:
+
+        p' = sigmoid(a + b * logit(p))
+
+    with b below 1 flattening confidence and a putting the fixed point where
+    the ledger says the model is already honest, near 60%. A bet stated at
+    95% becomes 87%; a bet stated at 60% keeps its number. Fitted on the
+    earlier half of the season it held up on the later half, fitted on the
+    later it held up on the earlier, and carried to the Championship unseen
+    it cut the Brier score there too, so it is not one season-half's noise.
+
+    It is deliberately NOT applied to the record-only fallback, which never
+    goes through the count model and already flags itself as blunt.
+    """
+    p = min(1 - 1e-9, max(1e-9, p))
+    z = CALIBRATION_A + CALIBRATION_B * math.log(p / (1 - p))
+    return 1 / (1 + math.exp(-z))
+
+
 def poisson_cdf(k: int, mean: float) -> float:
     """P(X <= k). Summed forwards rather than via a gamma function because k
     is always small here and the loop is exact."""
@@ -264,6 +307,16 @@ def price(
     # should not halve it or double it.
     absurd = expected < 0.5 * mean or expected > 2 * mean
     conflict = absurd or wilson_low(hits, total) > p_high + 0.05
+
+    # Calibration is applied last, to the quoted numbers only. The conflict
+    # checks above compare the record against the model's raw ceiling, which
+    # is a question about whether the two views cohere, not about how much to
+    # trust the confident one, so they stay on the uncalibrated values and
+    # the set of bets surfaced does not change. Both `p` and the widened
+    # probability pass through the same monotone map, so `need` keeps its
+    # place on the pessimistic side of `fair`.
+    p = calibrate(p)
+    p_low = calibrate(p_low)
 
     return {
         "p": p,

@@ -53,7 +53,8 @@ def extract_js() -> str:
     """The maths functions out of report.py's JS, with no DOM in sight."""
     js = report.JS
     wanted = ["logGamma", "poissonCdf", "negBinCdf", "logChoose", "binomCdf",
-              "dispersion", "predictiveRatio", "probOver", "wilsonLow"]
+              "dispersion", "predictiveRatio", "probOver", "wilsonLow",
+              "calibrate"]
 
     out = []
     for name in wanted:
@@ -72,7 +73,16 @@ def extract_js() -> str:
     if not prior:
         raise SystemExit("could not find DISPERSION_PRIOR in report.py's JS")
 
-    return constants.group(0) + "\n" + prior.group(0) + "\n" + "\n".join(out)
+    # Pulled out by name rather than hardcoded here, so a refit that edits the
+    # numbers in report.py cannot leave this check silently comparing against
+    # yesterday's constants.
+    cal = re.search(
+        r"const CALIBRATION_A = [-\d.]+;\s*\nconst CALIBRATION_B = [-\d.]+;", js)
+    if not cal:
+        raise SystemExit("could not find the calibration constants in report.py's JS")
+
+    return (constants.group(0) + "\n" + prior.group(0) + "\n"
+            + cal.group(0) + "\n" + "\n".join(out))
 
 
 def run_js(cases: list[dict]) -> list[dict]:
@@ -82,6 +92,7 @@ const out = cases.map(c => ({
   probOver: probOver(c.line, c.mean, c.values),
   probWide: probOver(c.line, c.mean, c.values, predictiveRatio(c.values, c.mean)),
   wilson: wilsonLow(c.hits, c.total),
+  calibrated: calibrate(probOver(c.line, c.mean, c.values)),
 }));
 console.log(JSON.stringify(out));
 """
@@ -419,7 +430,7 @@ def main() -> None:
 
     js_results = run_js(cases)
 
-    worst_prob = worst_wilson = 0.0
+    worst_prob = worst_wilson = worst_cal = 0.0
     failures = []
 
     for case, js in zip(cases, js_results):
@@ -436,7 +447,15 @@ def main() -> None:
         worst_prob = max(worst_prob, d_prob)
         worst_wilson = max(worst_wilson, d_wilson)
 
-        if d_prob > TOLERANCE or d_wilson > TOLERANCE or d_wide > TOLERANCE:
+        # The calibration is the newest place the two implementations can
+        # drift, and the most dangerous: it is a pair of fitted constants
+        # applied to every quoted price, so a typo in one copy would move
+        # every number on the site while both files still ran perfectly.
+        d_cal = abs(model.calibrate(py_prob) - js["calibrated"])
+        worst_cal = max(worst_cal, d_cal)
+
+        if (d_prob > TOLERANCE or d_wilson > TOLERANCE or d_wide > TOLERANCE
+                or d_cal > TOLERANCE):
             failures.append(
                 f"  mean={case['mean']} line={case['line']} sample={case['sample']}: "
                 f"python {py_prob:.12f} vs js {js['probOver']:.12f}"
@@ -445,6 +464,7 @@ def main() -> None:
     print(f"checked {len(cases)} input combinations")
     print(f"  worst probOver  difference: {worst_prob:.2e}")
     print(f"  worst wilsonLow difference: {worst_wilson:.2e}")
+    print(f"  worst calibrate difference: {worst_cal:.2e}")
 
     if failures:
         print(f"\nMISMATCH in {len(failures)} case(s):")

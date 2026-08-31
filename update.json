@@ -5,12 +5,16 @@
     "La Liga",
     "Serie A",
     "Bundesliga",
-    "Ligue 1"
+    "Ligue 1",
+    "MLS",
+    "Brasileirao"
   ],
   "games": 38,
   "players": true,
   "adjust": true,
   "tiers": true,
+  "h2h": true,
+  "referee": true,
   "prune": true,
   "push": true,
   "delay_min": 3.0,

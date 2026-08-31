@@ -283,12 +283,32 @@ def calibration(rows: list[dict], key: str, label: str) -> None:
     print(f"\n  Brier score: {brier:.4f}   (lower is better, 0.25 is a coin flip)")
 
 
+def _production_games(fallback: int = 38) -> int:
+    """The form window the scheduled build uses, read from update.json."""
+    try:
+        import json
+        from pathlib import Path as _Path
+        config = _Path(__file__).parent / "update.json"
+        return int(json.loads(config.read_text(encoding="utf-8"))["games"])
+    except Exception:
+        return fallback
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--league", help="one competition by name")
     parser.add_argument("--leagues", help="several, comma separated")
-    parser.add_argument("--games", type=int, default=10,
-                        help="matches of form the model may look back on")
+    # Defaults to whatever the scheduled build actually uses, not a number
+    # of its own.
+    #
+    # It used to default to 10 while update.json built the live site with 38,
+    # so every calibration figure this tool produced described a model nobody
+    # was betting off. The gap it reported was 8.2 points; the site's real one
+    # at 38 matches is 5.8. A backtest that measures a different model from the
+    # one in production is worse than no backtest, because it is believed.
+    parser.add_argument("--games", type=int, default=_production_games(),
+                        help="matches of form the model may look back on "
+                             "(defaults to the games setting in update.json)")
     parser.add_argument("--from", dest="since", default=None,
                         help="only fixtures on or after this date, YYYY-MM-DD")
     parser.add_argument("--csv", help="write every settled bet to this file")
@@ -321,24 +341,37 @@ def main() -> None:
         print(f"\n{'=' * 62}\n{name}\n{'=' * 62}")
 
         try:
-            team_ids = api.tournament_team_ids(tournament_id)
+            roster = api.tournament_team_ids(tournament_id)
         except Exception:
-            team_ids = []
-        if len(team_ids) < 4:
+            roster = []
+        if len(roster) < 4:
             print("  could not read the team list from cache, skipping")
             continue
 
         tester = Backtester(tournament_id, args.games)
 
-        # Every finished fixture any of these clubs played, de-duplicated.
+        def competition_of(event: dict):
+            return (event.get("tournament", {})
+                    .get("uniqueTournament", {}).get("id"))
+
+        # Harvest every finished fixture these clubs played, de-duplicated.
+        # collect_events falls back to all competitive matches when a club is
+        # short of history in this competition, which is right when building
+        # form but wrong as a source of fixtures to settle: it is how a
+        # "Premier League" backtest came to quietly settle a promoted club's
+        # entire Championship season, playoffs and cup ties, and to answer a
+        # different question from the one printed at the top. So harvest
+        # loosely, then keep only fixtures actually tagged with this
+        # competition, and say how many were dropped.
         seen = set()
         fixtures = []
-        for team_id in team_ids:
+
+        def harvest(team_id: int) -> None:
             try:
                 events = hitrates.collect_events(
                     team_id, tournament_id, team_name=str(team_id), verbose=False)
             except Skipped:
-                continue
+                return
             for event in events:
                 if event["id"] in seen:
                     continue
@@ -347,15 +380,55 @@ def main() -> None:
                 seen.add(event["id"])
                 fixtures.append(event)
 
-        fixtures.sort(key=lambda e: e.get("startTimestamp", 0))
-        print(f"  {len(fixtures)} finished fixture(s) to replay")
+        for team_id in roster:
+            harvest(team_id)
 
-        for i, event in enumerate(fixtures, start=1):
+        # The roster above is today's table, but the fixtures being replayed
+        # may belong to an earlier season. A club relegated since then is not
+        # on today's table, so none of its own matches were harvested, and a
+        # fixture between two such clubs would be missed entirely. Any club
+        # appearing in this competition's fixtures belongs in the replay, so
+        # keep harvesting until no new club turns up.
+        harvested = set(roster)
+        while True:
+            discovered = {
+                event[side]["id"]
+                for event in fixtures if competition_of(event) == tournament_id
+                for side in ("homeTeam", "awayTeam")
+            } - harvested
+            if not discovered:
+                break
+            for team_id in discovered:
+                harvest(team_id)
+            harvested |= discovered
+
+        replay = [e for e in fixtures if competition_of(e) == tournament_id]
+        excluded = len(fixtures) - len(replay)
+        replay.sort(key=lambda e: e.get("startTimestamp", 0))
+
+        # Ratings are fitted over the clubs that appear in the replayed
+        # fixtures, not over today's table. Replaying last season with this
+        # season's roster leaves every relegated club unrated -- all of their
+        # bets silently fall back to raw-record pricing -- and lets the
+        # promoted clubs drag their old division's numbers into the league
+        # average. The fixtures themselves are the season-correct roster.
+        team_ids = sorted({
+            e[side]["id"] for e in replay for side in ("homeTeam", "awayTeam")
+        })
+
+        print(f"  {len(replay)} finished fixture(s) to replay, "
+              f"{len(team_ids)} club(s) involved")
+        if excluded:
+            print(f"  {excluded} fixture(s) excluded as other competitions "
+                  f"(cups, playoffs, another division): this backtest settles "
+                  f"only {name} matches")
+
+        for i, event in enumerate(replay, start=1):
             tester.fixture(event, team_ids)
             if i % 10 == 0:
-                print(f"    {i}/{len(fixtures)}, {len(tester.rows)} bets settled", end="\r")
+                print(f"    {i}/{len(replay)}, {len(tester.rows)} bets settled", end="\r")
 
-        print(f"    {len(fixtures)}/{len(fixtures)}, {len(tester.rows)} bets settled     ")
+        print(f"    {len(replay)}/{len(replay)}, {len(tester.rows)} bets settled     ")
         all_rows.extend(tester.rows)
         total_skipped += tester.skipped
 

@@ -21,7 +21,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from curl_cffi import requests
+# curl_cffi is imported inside _get_session rather than here.
+#
+# It is only needed to make a real request, and several things that use this
+# module never make one: backtest.py walks thousands of cached fixtures and
+# says so in its own docstring, and rerender.py rebuilds pages from data
+# already on disk. A module-level import made those cache-only paths fail on
+# any machine without the package installed, for a dependency they never use.
 
 # The site itself calls www.sofascore.com/api/v1, not api.sofascore.com.
 # Always use the host the browser uses.
@@ -77,6 +83,15 @@ TOURNAMENTS = {
     "ligue_1": 34,
     "champions_league": 7,
     "europa_league": 679,
+    "mls": 242,
+    "major_league_soccer": 242,
+    # Brazil's top flight is also called Serie A, and "serie_a" above is
+    # Italy's. Anything that resolves to Brazil has to say so, which is why
+    # there is no bare "serie_a" alias here: a typo that silently built the
+    # wrong continent's league would be very hard to spot in a finished report.
+    "brasileirao": 325,
+    "brasileirao_serie_a": 325,
+    "brazil_serie_a": 325,
 }
 
 def tournament_id_for(name: str) -> int | None:
@@ -91,7 +106,14 @@ def tournament_id_for(name: str) -> int | None:
     if not name:
         return None
 
-    squashed = "".join(c for c in name.lower() if c.isalnum())
+    # Accents are stripped as well as punctuation. Python counts an accented
+    # letter as alphanumeric, so "Brasileirao" and "Brasileirao" written with
+    # the tilde squash to different strings and only one of them would match.
+    # That is the same class of bug as the LaLiga one above, and it would fail
+    # the same silent way.
+    import unicodedata
+    folded = unicodedata.normalize("NFKD", name.lower())
+    squashed = "".join(c for c in folded if c.isalnum() and not unicodedata.combining(c))
     for key, tournament_id in TOURNAMENTS.items():
         if "".join(c for c in key if c.isalnum()) == squashed:
             return tournament_id
@@ -110,6 +132,7 @@ def _get_session():
     """
     global _session
     if _session is None:
+        from curl_cffi import requests
         _session = requests.Session(impersonate="chrome")
         _session.headers.update(
             {
@@ -404,6 +427,27 @@ def squad_player_ids(team_id: int) -> set[int]:
 def event_statistics(event_id: int) -> dict | None:
     """Team-level match stats: shots, corners, offsides, throw-ins, cards."""
     return get_json(f"event/{event_id}/statistics")
+
+
+def event_details(event_id: int, max_age_hours: float | None = 12) -> dict | None:
+    """The full record for a single match: venue, attendance and, once one
+    has been appointed, the referee - complete with SofaScore's running card
+    totals for him (yellowCards, redCards, yellowRedCards, games), which is
+    what makes a card rate possible without any per-referee endpoint.
+
+    Twelve hours of cache, not permanent, and that is deliberate. This is
+    called for UPCOMING fixtures, and referee appointments are typically
+    published only a few days before kick-off. A permanent cache taken a week
+    out would freeze "no referee yet" forever; twelve hours means the daily
+    07:00 run re-asks once a day until the name appears. The cache file is
+    event_{id}.json, the same entry a finished match would use, so nothing
+    is fetched twice.
+    """
+    data = get_json(f"event/{event_id}", max_age_hours=max_age_hours)
+    if not isinstance(data, dict):
+        return None
+    event = data.get("event")
+    return event if isinstance(event, dict) else None
 
 
 def h2h_events(event_id: int) -> list[dict]:

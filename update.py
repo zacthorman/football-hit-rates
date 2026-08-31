@@ -52,6 +52,18 @@ DEFAULTS = {
     "players": True,
     "adjust": True,
     "tiers": True,
+    # Without this run.py never fetches previous meetings, DATA.h2h stays
+    # empty, and the report disables its own Head to head button. The feature
+    # was built and then never switched on.
+    "h2h": True,
+    # Off by default. It back-fills a new signing's record from his previous
+    # club, which costs up to about forty extra requests per fixture, and it
+    # is a garnish rather than something the site needs to be correct.
+    "newsignings": False,
+    # One request per fixture, about ninety a run, five to ten minutes. It
+    # buys the official's name and his card rate, which is shown and never
+    # priced. Cheap enough to leave on.
+    "referee": True,
     "prune": True,
     "push": True,
     # Slower than an interactive run on purpose. Nobody is waiting for this
@@ -331,7 +343,8 @@ def main() -> None:
 
             command = [python, "run.py", "--leagues", ",".join(leagues),
                        "--games", str(settings["games"]), "--no-open"]
-            for flag in ("players", "adjust", "tiers"):
+            for flag in ("players", "adjust", "tiers", "h2h", "newsignings",
+                         "referee"):
                 if settings.get(flag):
                     command.append(f"--{flag}")
 

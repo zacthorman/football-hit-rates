@@ -443,6 +443,34 @@ select { max-width: 100%; min-width: 0; text-overflow: ellipsis; }
 .pick-foot b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .pick-foot .add-btn { margin-left: auto; }
 
+/* Positional matchup: the opponent's side of a player bet. A cell on the
+   Players tab and a third block on a player pick. */
+.mu { min-width: 0; }
+.mu-fig { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.mu-fig b { color: var(--text-primary); }
+.mu-rate { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mu-note {
+  font-size: 11.5px; color: var(--muted); margin-top: 2px;
+  font-variant-numeric: tabular-nums; width: 165px;
+}
+/* The sample statement on a pick. Not .seq: that class is hidden on a phone
+   and ellipsised on a card, and this line is the one that must always be
+   read in full. */
+.mu-seq {
+  grid-column: 1 / -1; font-size: 11.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: normal;
+}
+.mu-thin .mu-fig, .mu-thin .mu-rate, .half.mu-thin .half-num { opacity: 0.7; }
+.mu-none { font-size: 12px; color: var(--muted); }
+.pick-halves.three { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 900px) { .pick-halves.three { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 660px) {
+  .pick-halves.three { grid-template-columns: 1fr; }
+  .ptable .mu::before { content: attr(data-label) ": "; color: var(--muted); }
+  .ptable .mu .mu-fig, .ptable .mu .mu-rate { display: inline; margin-right: 6px; }
+  .ptable .mu .mu-note { width: auto; }
+}
+
 /* A player with barely any appearances. Shown rather than hidden, because a
    missing player reads as missing data, but marked so a 100% record off one
    match is never mistaken for a strong one. */
@@ -1652,12 +1680,149 @@ function appearances(played, stat) {
     .filter(g => g.value !== undefined && g.value !== null);
 }
 
-function pricePlayer(apps, line, over, adjustment) {
+/* --------------------------------------------- thin-sample pooling
+
+   Below three appearances the record interval has a degenerate corner:
+   every 1-from-1 player, whoever he is and whatever the stat, priced
+   `need` at wilsonLow(1, 1) = 0.2065, which is 4.84, every time. The
+   number carried no information about the player at all.
+
+   So a thin sample is now partially pooled, which is the owner's request
+   in his own words: "weight it on a mix of other players from their team
+   in their position, and also their record over the past game or 2."
+
+   The prior is the pooled per-90 rate for this stat among players of the
+   same position class (G/D/M/F) on the same team, excluding the player
+   himself, over the same filtered window his own record uses. The blend
+   weight is w = minutes / (minutes + POOL_K), minutes-based rather than
+   appearance-based so a 45-minute cameo counts as half a match of
+   evidence, and the blended rate is priced through the same count-model
+   path the three-plus branch has always used.
+
+   HONESTY: there is NO backtest behind this. backtest.py settles team
+   bets only; player bets have never been measured at all. This branch is
+   principled shrinkage, not a validated model, and every row it touches
+   says so on the page. */
+
+/* Two full appearances' worth of prior evidence, in minutes. At one full
+   appearance the team-mates carry 2/3 of the rate and his own match 1/3,
+   which is the owner's "past game or 2"; at two it is an even split; at
+   three the model path takes over on his own record entirely, as it
+   always has, and the demonstration in the change notes shows that step
+   is small in practice. */
+const POOL_K = 2 * 90;
+
+/* How unlike each other players of one position class are, as a
+   coefficient of variation on the pooled rate. Team-mates are a proxy for
+   the player, not a measurement of him, and the widening below has to
+   carry that. 0.5 is a judgement call, not a fitted number. */
+const POOL_SPREAD = 0.5;
+
+/* Shrinkage of the ESTABLISHED player branch's stated log-odds -- the same
+   Platt map as calibrate() with its own constants, fitted on player bets
+   only. Fitted by logistic regression of outcome on log-odds over the 6,633
+   settled established player bets (source "model", 3+ appearances) that
+   `backtest.py --league "Premier League" --players` produces at the
+   production window of 38 matches, fixtures 2025-09-20 to 2026-08-30, run
+   2026-08-31: they said 75.5% and landed 68.2%. Both half-season splits
+   held out of sample, and on the Championship unseen it closed a -6.9 gap
+   to +0.6. Applied ONLY to the established branch: the thin blended branch
+   measured nearly calibrated in the same run and this map would make it
+   too cautious, and the record fallback stays raw as it does on the team
+   path. This is the exact mirror of calibrate_player() in model.py --
+   change one, run verify.py, change the other. Refit if `games` in
+   update.json, MIN_MINUTES, or the player pricing maths changes. */
+const PLAYER_CALIBRATION_A = -0.0045;
+const PLAYER_CALIBRATION_B = 0.6425;
+
+function calibratePlayer(p) {
+  p = Math.min(1 - 1e-9, Math.max(1e-9, p));
+  const z = PLAYER_CALIBRATION_A + PLAYER_CALIBRATION_B * Math.log(p / (1 - p));
+  return 1 / (1 + Math.exp(-z));
+}
+
+function positionPrior(byPlayer, position, stat, excludeName) {
+  let value = 0, minutes = 0, players = 0;
+  const mins = [];
+  byPlayer.forEach((played, name) => {
+    if (name === excludeName) return;
+    if ((played[0].position || "") !== position) return;
+    const apps = appearances(played, stat);
+    if (!apps.length) return;
+    players += 1;
+    apps.forEach(a => { value += a.value; minutes += a.minutes; mins.push(a.minutes); });
+  });
+  if (!players || minutes <= 0) return null;
+  mins.sort((a, b) => a - b);
+  return { per90: (value / minutes) * 90, value, minutes, players,
+           medianMinutes: Math.min(90, mins[Math.floor(mins.length / 2)]) };
+}
+
+function pricePlayer(apps, line, over, adjustment, prior) {
   const n = apps.length;
   const values = apps.map(a => a.value);
   const hits = values.filter(v => (v > line) === over).length;
+  const totalMinutes = apps.reduce((s, a) => s + a.minutes, 0);
+  const totalValue = values.reduce((s, v) => s + v, 0);
 
   if (n < 3) {
+    // Partial pooling toward the team/position prior -- see the comment
+    // above, including the fact that no backtest has ever measured this.
+    if (n && prior && totalMinutes > 0) {
+      const w = totalMinutes / (totalMinutes + POOL_K);
+      const ownPer90 = (totalValue / totalMinutes) * 90;
+      const per90 = w * ownPer90 + (1 - w) * prior.per90;
+
+      // Minutes: his own median once he has two appearances to take one
+      // from. On a single appearance one match's minutes is not a median
+      // of anything, so the smaller of that match and the position's
+      // pooled median is used: understating a nailed-on starter slightly
+      // lengthens the price, which is the safe direction for the overs
+      // this page quotes.
+      const sorted = apps.map(a => a.minutes).sort((x, y) => x - y);
+      const ownMedian = Math.min(90, sorted[Math.floor(n / 2)]);
+      const expectedMinutes = n >= 2
+        ? ownMedian
+        : Math.min(ownMedian, prior.medianMinutes || ownMedian);
+
+      const expected = per90 * (expectedMinutes / 90) * adjustment;
+      if (expected > 0) {
+        // `need` widens for the blend's own uncertainty, the same move
+        // predictiveRatio makes for a measured sample: the standard
+        // error of the blended rate rides on top of the base
+        // distribution (Poisson here, since dispersion() is 1 below
+        // three appearances) as extra variance. The prior's error term
+        // carries POOL_SPREAD as well as its counting error, because a
+        // pooled team-mate rate can be precisely measured and still be
+        // the wrong player's number.
+        const seOwn = 90 * Math.sqrt(Math.max(totalValue, 1)) / totalMinutes;
+        const sePrior = 90 * Math.sqrt(Math.max(prior.value, 1)) / prior.minutes;
+        const spread = POOL_SPREAD * prior.per90;
+        const sePer90 = Math.sqrt(
+          w * w * seOwn * seOwn
+          + (1 - w) * (1 - w) * (sePrior * sePrior + spread * spread));
+        const se = sePer90 * (expectedMinutes / 90) * adjustment;
+        const wide = (expected + se * se) / expected;
+
+        let p = probOver(line, expected, values);
+        let widened = probOver(line, expected, values, wide);
+        if (!over) { p = 1 - p; widened = 1 - widened; }
+        const pLow = Math.min(p, widened);
+
+        return {
+          p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),
+          expected, source: "blend", hits, n,
+          per90, expectedMinutes, minutes: totalMinutes,
+          blend: { w, prior },
+        };
+      }
+    }
+
+    // No appearances at all, no same-position team-mates to pool from, or
+    // an expectation of zero: the old record-only interval stands. A squad
+    // member with no minutes gets no price on purpose -- a number built
+    // entirely from team-mates would sit on the page looking like his,
+    // and it is not.
     const p = n ? hits / n : 0;
     return { p, fair: fairOdds(p), need: fairOdds(wilsonLow(hits, n)),
              expected: undefined, source: "record", hits, n };
@@ -1665,8 +1830,6 @@ function pricePlayer(apps, line, over, adjustment) {
 
   // Rate per 90, then scaled to the minutes he is likely to get. Median
   // rather than mean minutes, so one early substitution does not decide it.
-  const totalMinutes = apps.reduce((s, a) => s + a.minutes, 0);
-  const totalValue = values.reduce((s, v) => s + v, 0);
   if (totalMinutes <= 0 || totalValue <= 0) {
     const p = hits / n;
     return { p, fair: fairOdds(p), need: fairOdds(wilsonLow(hits, n)),
@@ -1688,11 +1851,280 @@ function pricePlayer(apps, line, over, adjustment) {
   if (!over) { p = 1 - p; widened = 1 - widened; }
   const pLow = Math.min(p, widened);
 
+  // Calibration last, to the quoted numbers only, as in priceRow(): both p
+  // and the widened probability pass through the same monotone map, so
+  // `need` keeps its place on the pessimistic side of `fair`. Only this
+  // branch -- the blend and record branches above quote raw numbers on
+  // purpose; see calibratePlayer().
+  p = calibratePlayer(p);
+  const pLowCal = calibratePlayer(pLow);
+
   return {
-    p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLow)),
+    p, fair: fairOdds(p), need: fairOdds(Math.max(0.01, pLowCal)),
     expected, source: "model", hits, n,
     per90, expectedMinutes, minutes: totalMinutes,
   };
+}
+
+
+/* ------------------------------------------------------ positional matchups
+
+   The other half of a player bet. A player's own record says what he has
+   been doing; it says nothing about whether the side in front of him this
+   week tends to allow it. Saka clearing 0.5 shots in nine of ten is one half
+   of the case. Whether forwards facing Aston Villa get their shot is the
+   other, and until now the page never asked.
+
+   Built from every player record already in the report, across all of its
+   fixtures and not only the one on screen. To know what forwards have done
+   against Villa you go through every other team's player records for the
+   matches whose opponent was Villa. A league report holds twenty squads, so
+   most of a team's matches have the opposing players on file; the ones that
+   do not (cup ties, matches in another division, opponents not in this file)
+   are counted and the shortfall is printed, because a rate over three matches
+   must never look like one over thirty-eight.
+
+   Position is the coarsest thing SofaScore gives: G, D, M or F. There is no
+   winger, no left or right, so "right wingers facing Villa" is not
+   expressible here and is not attempted. The formation string on a lineup
+   could in principle place a man on a flank, but the mapping is undocumented,
+   and a bet hung on a guessed flank is worse than one hung on nothing.
+   Position class it is, and the page says so.
+
+   The join is by id. A player record carries a match id, and that match sits
+   in its own team's records with the opponent's id. The record's `opponent`
+   is a short name and is never used to match, for the reason opponentIdFor()
+   gives. Former-club rows carry no opponent id and are left out.
+
+   Context only, by agreement. Nothing computed here reaches pricePlayer(),
+   playerAdjustment(), any line or any projection. Today's backtest found
+   that head-to-head history and possession both looked informative and
+   measured as noise or as generic shrinkage, so nothing new moves a price
+   until it has been backtested. This is shown beside the numbers, not fed
+   into them. */
+
+const POSITION_NAME = { G: "goalkeepers", D: "defenders", M: "midfielders", F: "forwards" };
+
+/* What to look up for each player stat, and on whose side.
+
+   "conceded": players of the SAME position class who FACED the opponent, and
+   what they produced in the same stat. A forward's shots bet asks what the
+   opponent gives up in shots to forwards; a keeper's saves bet asks how many
+   saves keepers facing this attack have had to make. Same position, same
+   stat, drawn from the opponent's matches. That covers shots, shots on
+   target, goals, assists, tackles, passes and saves: for each of them the
+   opponent's style is what governs how much of it a player in his role gets
+   to do, and the players who have already been in his role against them are
+   the direct evidence.
+
+   "own": the opponent's OWN players, in the position class he will be
+   contending with, and the mirror stat. Fouls have no same-position answer:
+   a midfielder's fouls are committed on the men he closes down, so the
+   question is how often the opponent's attackers get fouled, not what other
+   midfielders have done. Committed maps to drawn and drawn to committed. The
+   positions are a simplification forced by four classes: anyone defending
+   (G, D, M) is taken to be fouling the opponent's forwards, which is the
+   user's own example (a holding midfielder's fouls against Villa's strikers),
+   and a forward's fouls are on the opponent's defenders. Coming the other
+   way, a forward is fouled by defenders, a midfielder by midfielders, a
+   defender or keeper by forwards.
+
+   Minutes has no opposing half and is left out. */
+const FOULS_ON = { G: "F", D: "F", M: "F", F: "D" };   // who a fouler fouls
+const FOULED_BY = { G: "F", D: "F", M: "M", F: "D" };  // who fouls him
+const MATCHUP_PAIRING = {
+  "Shots":           { mode: "conceded", stat: "Shots" },
+  "Shots on target": { mode: "conceded", stat: "Shots on target" },
+  "Goals":           { mode: "conceded", stat: "Goals" },
+  "Assists":         { mode: "conceded", stat: "Assists" },
+  "Tackles":         { mode: "conceded", stat: "Tackles" },
+  "Passes":          { mode: "conceded", stat: "Passes" },
+  "Saves":           { mode: "conceded", stat: "Saves" },
+  "Fouls":           { mode: "own", stat: "Fouled", positions: FOULS_ON },
+  "Fouled":          { mode: "own", stat: "Fouls", positions: FOULED_BY },
+};
+
+/* Fewer matches with data than this and the profile is marked thin. Three
+   matches of forwards is a dozen appearances and one good afternoon. */
+const MATCHUP_MIN_MATCHES = 5;
+
+/* Built once per page from ALL, on first use, and never rebuilt: the payload
+   does not change. Tens of thousands of records go in; what comes out is two
+   maps of references, team id to position to records, plus the set of match
+   ids each team has any data for, so a profile is a filter over one short
+   list rather than a scan of the file. */
+let MATCHUP_INDEX = null;
+const MATCHUP_CACHE = new Map();
+
+function matchupIndex() {
+  if (MATCHUP_INDEX) return MATCHUP_INDEX;
+  const conceded = new Map();   // team id -> position -> records of players who faced them
+  const own = new Map();        // team id -> position -> that team's own player records
+  const covered = { conceded: new Map(), own: new Map() };  // team id -> match ids with any data
+  const seen = new Set();
+
+  const add = (map, teamId, pos, r) => {
+    let byPos = map.get(teamId);
+    if (!byPos) { byPos = new Map(); map.set(teamId, byPos); }
+    let list = byPos.get(pos);
+    if (!list) { list = []; byPos.set(pos, list); }
+    list.push(r);
+  };
+  const mark = (map, teamId, mid) => {
+    let ids = map.get(teamId);
+    if (!ids) { ids = new Set(); map.set(teamId, ids); }
+    ids.add(mid);
+  };
+
+  (ALL.fixtures || []).forEach(fx => {
+    if (!Array.isArray(fx.players)) return;
+    fx.players.forEach((records, teamIndex) => {
+      const team = (fx.teams || [])[teamIndex];
+      if (!team || team.id === undefined || team.id === null) return;
+      const byMatch = new Map(((fx.records || [])[teamIndex] || []).map(m => [m.id, m]));
+      (records || []).forEach(r => {
+        if (r.former_club) return;
+        const m = byMatch.get(r.match_id);
+        if (!m || m.opponent_id === undefined || m.opponent_id === null) return;
+        // The same club sits in two fixtures of one file when a round spans
+        // a midweek, carrying the same records under each. Counted once.
+        const key = `${r.match_id}|${r.player_id !== undefined && r.player_id !== null ? r.player_id : r.player}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const pos = r.position || "?";
+        add(own, team.id, pos, r);
+        add(conceded, m.opponent_id, pos, r);
+        mark(covered.own, team.id, r.match_id);
+        mark(covered.conceded, m.opponent_id, r.match_id);
+      });
+    });
+  });
+
+  MATCHUP_INDEX = { conceded, own, covered };
+  return MATCHUP_INDEX;
+}
+
+/* The opponent's profile against one position class, over one window of the
+   opponent's matches. `window` is the list of that opponent's team records
+   the caller is showing, so "last 10" means the same ten matches on both
+   halves of the case; `windowKey` names the filter state for the cache.
+   Appearances use the same 45-minute floor and zero-fill as the player's own
+   record, so the two halves are counted the same way. The rate is per 90,
+   never per appearance: a sub's twenty minutes would otherwise read as a
+   forward who never shoots. The share is of appearances clearing the line,
+   because that is what the bet asks. */
+function matchupProfile(fx, oppIndex, playerPos, stat, line, window, windowKey) {
+  const pairing = MATCHUP_PAIRING[stat];
+  const opp = (fx.teams || [])[oppIndex];
+  if (!pairing || !opp || opp.id === undefined || opp.id === null) return null;
+  const pos = pairing.mode === "own" ? pairing.positions[playerPos] : playerPos;
+  if (!pos || !POSITION_NAME[pos]) return null;
+
+  const cacheKey = `${fx.fixture ? fx.fixture.id : ""}|${oppIndex}|${pos}|${stat}|${line}|${windowKey}`;
+  const held = MATCHUP_CACHE.get(cacheKey);
+  if (held) return held;
+  if (MATCHUP_CACHE.size > 4000) MATCHUP_CACHE.clear();
+
+  const idx = matchupIndex();
+  const source = pairing.mode === "own" ? idx.own : idx.conceded;
+  const pool = (source.get(opp.id) || new Map()).get(pos) || [];
+  const windowIds = new Set(window.map(m => m.id));
+  const withData = idx.covered[pairing.mode].get(opp.id) || new Set();
+  let covered = 0;
+  windowIds.forEach(id => { if (withData.has(id)) covered++; });
+
+  let n = 0, hits = 0, total = 0, minutes = 0;
+  const matches = new Set();
+  pool.forEach(g => {
+    if (!windowIds.has(g.match_id)) return;
+    if ((g.minutes || 0) < MIN_MINUTES) return;
+    let v = (g.stats || {})[pairing.stat];
+    if ((v === undefined || v === null) && ZERO_FILL.has(pairing.stat)) v = 0;
+    if (v === undefined || v === null) return;
+    n++; total += v; minutes += g.minutes;
+    if (v > line) hits++;
+    matches.add(g.match_id);
+  });
+
+  const profile = {
+    mode: pairing.mode, stat: pairing.stat, pos, posName: POSITION_NAME[pos],
+    team: opp.name, line,
+    n, hits, matches: matches.size,
+    share: n ? hits / n : null,
+    per90: minutes > 0 ? (total / minutes) * 90 : null,
+    windowMatches: window.length, covered,
+    thin: matches.size < MATCHUP_MIN_MATCHES,
+  };
+  MATCHUP_CACHE.set(cacheKey, profile);
+  return profile;
+}
+
+/* Who was measured, against whom, in one line of English. */
+function matchupLabel(m) {
+  const statName = m.stat === "Fouled" ? "fouls drawn"
+                 : m.stat === "Fouls" ? "fouls committed" : m.stat.toLowerCase();
+  return m.mode === "own"
+    ? `${m.team} ${m.posName}, ${statName}`
+    : `${m.posName} v ${m.team}, ${statName}`;
+}
+
+/* The sample, always. "9 of 10 matches" is the coverage statement: how many
+   of the opponent's matches in this window have the relevant player data in
+   this file. When fewer matches carried this position than carried any data
+   at all, both numbers are given. */
+function matchupSample(m) {
+  const apps = `${m.n} app${m.n === 1 ? "" : "s"}`;
+  const win = `${m.windowMatches} match${m.windowMatches === 1 ? "" : "es"}`;
+  if (m.matches === m.covered) return `${apps} in ${m.matches} of ${win}`;
+  return `${apps} in ${m.matches} matches; player data for ${m.covered} of ${win}`;
+}
+
+function matchupEmpty(m) {
+  return m.mode === "own"
+    ? `no ${escapeHtml(m.team)} player data in this window`
+    : `no opposition player data v ${escapeHtml(m.team)} in this window `
+      + `(${m.covered} of ${m.windowMatches} matches)`;
+}
+
+/* The Players tab cell. */
+function matchupCell(m) {
+  if (!m) return `<td class="mu" data-label="Matchup"><span class="mu-none">n/a</span></td>`;
+  if (!m.n) {
+    return `<td class="mu" data-label="Matchup"><span class="mu-none">${matchupEmpty(m)}</span></td>`;
+  }
+  const pct = Math.round(m.share * 100);
+  return `<td class="mu${m.thin ? " mu-thin" : ""}" data-label="Matchup">
+    <div class="mu-fig"><b>${pct}%</b> over ${m.line}</div>
+    <div class="mu-rate">${m.per90.toFixed(1)} per 90</div>${
+    m.thin
+      ? `<div class="mu-fig"><span class="tag-thin" title="Only ${m.matches} match${
+          m.matches === 1 ? "" : "es"} with player data for this position in
+          this window. Too few to lean on.">thin: ${m.matches} match${
+          m.matches === 1 ? "" : "es"}</span></div>`
+      : ""}
+    <div class="mu-note">${escapeHtml(matchupLabel(m))} &middot; ${matchupSample(m)}</div>
+  </td>`;
+}
+
+/* The third block on a player pick in Best bets. */
+function matchupHalf(m, teamIndex) {
+  if (!m) return "";
+  if (!m.n) {
+    return `<div class="half">
+      <span class="half-label">${escapeHtml(matchupLabel(m))}</span>
+      <span class="half-num">&mdash;</span>
+      <span class="mu-seq">${matchupEmpty(m)}</span>
+    </div>`;
+  }
+  const pct = Math.round(m.share * 100);
+  return `<div class="half${m.thin ? " mu-thin" : ""}">
+    <span class="half-label">${escapeHtml(matchupLabel(m))}, over ${m.line}</span>
+    <span class="half-num">${pct}%</span>
+    <div class="bar"><div class="fill" style="width:${pct}%;
+         background:var(${VARS[1 - teamIndex]})"></div></div>
+    <span class="mu-seq">${m.per90.toFixed(1)} per 90 &middot; ${matchupSample(m)}${
+      m.thin ? ` &middot; <b>thin: ${m.matches} match${m.matches === 1 ? "" : "es"}</b>` : ""}</span>
+  </div>`;
 }
 
 
@@ -1923,7 +2355,15 @@ function scanMatchups(minSample) {
    Overs only, at the suggested line, because that is how player markets are
    quoted and the suggested line stands in for where a book would hang one.
    Only stats with a real player market behind them are scanned, the same
-   reasoning as BETTABLE for teams: Passes and Rating stay out.
+   reasoning as BETTABLE for teams: Passes and Rating stay out, and so does
+   Goals via PLAYER_SCAN_EXCLUDE, for the measured reason given there.
+
+   The floor is applied to gateRate(), not to the raw record: the record is
+   shrunk towards the market's own base rate first, so a player qualifies on
+   how far he stands above typical for that market rather than on clearing
+   one number shared by markets whose base rates run from 9% to 62%. On the
+   raw record a short lucky streak in a rare-event market outscored genuine
+   ability in a common one, and the backtest measured exactly that.
 
    Capped at three per fixture, one row per player. A fixture carries ninety
    players and five stats, and every appearance sample is drawn from the same
@@ -1932,6 +2372,38 @@ function scanMatchups(minSample) {
    against ten team picks keeps them from swamping the list while still
    surfacing the case above. Pricing goes through pricePlayer, the same
    minutes-aware path as the Players tab, never the team model. */
+
+/* The scan gate, mirrored from model.py -- change one, run verify.py,
+   change the other.
+
+   Markets the scan must never propose. The Players tab still shows the
+   numbers and the custom builder will still price one on request; the
+   objection is to the tool recommending the bet. Goals is excluded because
+   the backtest proved the old floor structurally unable to select skill
+   there: base rate 9.5% per appearance, no player in 745 with 10+
+   appearances sustained 65%, so every qualifying record was a lucky streak
+   -- quoted goals bets averaged an 82.5% pre-match record and landed
+   21.8%. */
+const PLAYER_SCAN_EXCLUDE = new Set(["Goals"]);
+
+/* Pseudo-appearances of prior evidence the gate charges a record against,
+   at the market's own base rate. Chosen by replaying both leagues ungated
+   and re-gating offline: m of 5 matched or beat its neighbours in both
+   leagues while keeping 64-70% of the old gate's volume. */
+const GATE_PRIOR_APPS = 5;
+
+/* The hit rate the player scan gates on: the raw record shrunk towards the
+   market's own base rate. A fixed floor on hits/n cannot select skill in a
+   market whose base rate sits far below it, only luck, and the measured
+   overconfidence tracked exactly that distance (-3 points on tackles over
+   0.5, -25 on goals). Shrinking first makes the floor relative: a 4/4 run
+   clears 0.65 in a 60% market and fails it in a 25% one. `base` is the
+   pooled rate at this line across every appearance in the squad's own
+   window, so the gate sees only what the page already knows at kick-off. */
+function gateRate(hits, total, base) {
+  if (total + GATE_PRIOR_APPS <= 0) return 0;
+  return (hits + GATE_PRIOR_APPS * base) / (total + GATE_PRIOR_APPS);
+}
 
 const PLAYER_SCAN_CAP = 3;
 
@@ -1954,6 +2426,7 @@ function scanPlayerBets(minSample) {
 
       (fx.playerStats || []).forEach(stat => {
         if (!PLAYER_STAT_TO_TEAM[stat]) return;
+        if (PLAYER_SCAN_EXCLUDE.has(stat)) return;
         const line = (fx.playerLines || {})[stat];
         if (line === undefined) return;
 
@@ -1966,12 +2439,24 @@ function scanPlayerBets(minSample) {
           byPlayer.get(r.player).push(r);
         });
 
+        // The market's own base rate at this line: every appearance by
+        // every player in this squad's window, the population a record
+        // has to stand out from before it means anything.
+        let baseK = 0, baseN = 0;
+        const appsByName = new Map();
         byPlayer.forEach((played, name) => {
           const apps = appearances(played, stat);
+          appsByName.set(name, apps);
+          apps.forEach(a => { baseN += 1; if (a.value > line) baseK += 1; });
+        });
+        const base = baseN ? baseK / baseN : 0;
+
+        byPlayer.forEach((played, name) => {
+          const apps = appsByName.get(name);
           if (apps.length < minSample) return;
           const vals = apps.map(a => a.value);
           const hits = vals.filter(v => v > line).length;
-          if (hits / vals.length < MATCHUP_FLOOR) return;
+          if (gateRate(hits, vals.length, base) < MATCHUP_FLOOR) return;
 
           let vs = null;
           if (meetings) {
@@ -1983,8 +2468,16 @@ function scanPlayerBets(minSample) {
             }
           }
 
-          const price = pricePlayer(apps, line, true, adjustment);
+          const price = pricePlayer(apps, line, true, adjustment,
+            positionPrior(byPlayer, played[0].position || "", stat, name));
           if (!isFinite(price.fair)) return;
+
+          // The opponent's half, over the same match window the player's
+          // own record uses here (last N, venue pooled). Display only.
+          const matchup = matchupProfile(
+            fx, 1 - teamIndex, played[0].position || "", stat, line,
+            ((fx.records || [])[1 - teamIndex] || []).slice(-games),
+            `scan|${games}`);
 
           fxRows.push({
             score: wilsonLow(hits, vals.length),
@@ -2002,6 +2495,7 @@ function scanPlayerBets(minSample) {
             chance: binomTail(vals.length, hits),
             vs,
             vsAgrees: vs ? vs.k / vs.n >= MATCHUP_FLOOR : null,
+            matchup,
             price,
           });
         });
@@ -2247,7 +2741,7 @@ function bestBetsView() {
             <div class="pick-fixture">${escapeHtml(r.fixture)}</div>
           </div>
 
-          <div class="pick-halves">
+          <div class="pick-halves${r.matchup ? " three" : ""}">
             <div class="half">
               <span class="half-label">Last ${r.n} appearances</span>
               <span class="half-num">${r.k}/${r.n}</span>
@@ -2256,6 +2750,7 @@ function bestBetsView() {
               <span class="seq">${r.vals.map(fmtV).join(", ")}</span>
             </div>
             ${vsHalf}
+            ${matchupHalf(r.matchup, r.teamIndex)}
           </div>
 
           <div class="pick-foot">
@@ -2267,6 +2762,14 @@ function bestBetsView() {
                   `${price.expectedMinutes} expected minutes, adjusted for the matchup, ` +
                   `priced through the same path as the Players tab.">` +
                   `${price.expected.toFixed(1)}&nbsp;exp</span>`
+                : price.source === "blend"
+                ? `<span class="src warnsrc" title="Blended price: ` +
+                  `${Math.round((1 - price.blend.w) * 100)}% from same-position ` +
+                  `team-mates, ${Math.round(price.blend.w * 100)}% from his own ` +
+                  `${price.n} appearance${price.n === 1 ? "" : "s"}. Unproven: no ` +
+                  `backtest covers player bets.">` +
+                  `${price.expected.toFixed(1)}&nbsp;exp &middot; ` +
+                  `${Math.round((1 - price.blend.w) * 100)}% team</span>`
                 : `<span class="src warnsrc" title="Too little data for the minutes ` +
                   `model, so this is the record-only interval.">record only</span>`}
             </span>
@@ -2366,8 +2869,17 @@ function bestBetsView() {
       at this line against this exact opponent; the form record and the
       head-to-head agreeing is the strongest signal these rows carry, and the
       number of meetings is printed beside it because 1/1 is one match, not a
-      pattern. At most ${PLAYER_SCAN_CAP} player rows per fixture are let in,
-      so they cannot swamp the team matchups.` : ""}
+      pattern. To qualify at all, a player's record is first shrunk towards
+      the market's own base rate, so a short streak in a market where the
+      event is rare cannot buy its way in; goals are not proposed at all,
+      because no player sustains a scoring rate any floor would accept and
+      every qualifying record there was a lucky run. At most ${PLAYER_SCAN_CAP} player rows per fixture are let in,
+      so they cannot swamp the team matchups. The third block is the
+      opponent's half of the case: what they have allowed in this stat to
+      players of his position class, or for fouls what the players he will be
+      marking have drawn, over the same match window, with the sample and
+      coverage printed. Position is only G, D, M or F, so it cannot tell a
+      winger from a striker. It is context and moves no price.` : ""}
       <br><br>
       <strong>What it is not.</strong> This scan looked at
       <strong>${combos}</strong> combinations, and
@@ -2851,7 +3363,13 @@ function customRow() {
     // a per-90 rate scaled to the minutes he is likely to get, and the team
     // path has no notion of minutes at all: it found no projection, fell back
     // to the bare record, and priced a fouls under at 1.00 off a 0/14 record.
-    const price_ = pricePlayer(apps, line, over, playerAdjustment(stat, teamIndex));
+    const byName = new Map();
+    records.forEach(r => {
+      if (!byName.has(r.player)) byName.set(r.player, []);
+      byName.get(r.player).push(r);
+    });
+    const price_ = pricePlayer(apps, line, over, playerAdjustment(stat, teamIndex),
+      positionPrior(byName, mine[0].position || "", stat, playerName));
 
     return {
       player: playerName,
@@ -3000,6 +3518,13 @@ function playerView() {
     const meetings = source === "h2h" ? null : meetingIds(teamIndex);
     const oppName = DATA.teams[1 - teamIndex].name;
 
+    // The opponent's half of each row, over the opponent's matches under the
+    // same filters, so both halves of the case cover the same window. Only
+    // offered when the report carries team ids and the stat has a pairing.
+    const oppWindow = filtered(DATA.records[1 - teamIndex] || []);
+    const windowKey = `tab|${games}|${venue}|${tier}`;
+    const matchupOn = opponentIdFor(teamIndex) !== null && !!MATCHUP_PAIRING[stat];
+
     const colorVar = VARS[teamIndex];
     const title = `<h2 class="team-title">
         <span class="swatch" style="background:var(${colorVar})"></span>
@@ -3054,7 +3579,11 @@ function playerView() {
 
       return { name, pos: played[0].position || "", played, apps, vals,
                hits, pct, avg, missed, thin, vs,
-               imported: imported.length, from };
+               imported: imported.length, from,
+               matchup: matchupOn
+                 ? matchupProfile(DATA, 1 - teamIndex, played[0].position || "",
+                                  stat, line, oppWindow, windowKey)
+                 : null };
     }).filter(Boolean);
 
     // Well-evidenced players first, then the thin ones. A single appearance
@@ -3082,7 +3611,8 @@ function playerView() {
       }));
       const strong = p.pct >= STRONG_HIGH || p.pct <= STRONG_LOW;
 
-      const price = pricePlayer(p.apps, line, true, adjustment);
+      const price = pricePlayer(p.apps, line, true, adjustment,
+        positionPrior(byPlayer, p.pos, stat, p.name));
       const row = playerRow(p, stat, line, teamIndex, price);
       const inSlip = SLIP.some(s => s.key === rowKey(row));
       const index = PLAYER_ROWS.push({ row, price }) - 1;
@@ -3122,6 +3652,7 @@ function playerView() {
           p.vs
             ? `<b>${p.vs.k}/${p.vs.n}</b>`
             : `<span class="pos">not met</span>`}</td>` : ""}
+        ${matchupOn ? matchupCell(p.matchup) : ""}
         <td class="odds" data-label="Fair">${fmtOdds(price.fair)}</td>
         <td class="odds odds-min" data-label="Need">${fmtOdds(price.need)}
           ${price.source === "model"
@@ -3130,6 +3661,17 @@ function playerView() {
               `${price.expectedMinutes} expected minutes, then adjusted ` +
               `${adjustment >= 1 ? "up" : "down"} for the matchup.">` +
               `${price.expected.toFixed(1)}&nbsp;exp</span>`
+            : price.source === "blend"
+            ? `<span class="src warnsrc" title="Blended price, only ${price.n} ` +
+              `appearance${price.n === 1 ? "" : "s"}: ` +
+              `${Math.round((1 - price.blend.w) * 100)}% of the rate is the ` +
+              `${price.blend.prior.players} other ${POSITION_NAME[p.pos] || "players"} ` +
+              `in this squad pooled (${price.blend.prior.per90.toFixed(2)} per 90), ` +
+              `${Math.round(price.blend.w * 100)}% his own record, over ` +
+              `${price.expectedMinutes} expected minutes. Unproven: no backtest ` +
+              `covers player bets.">` +
+              `${price.expected.toFixed(1)}&nbsp;exp &middot; ` +
+              `${Math.round((1 - price.blend.w) * 100)}% team</span>`
             : `<span class="src warnsrc">record only</span>`}
         </td>
         <td><button type="button" class="add-btn" data-padd="${index}"
@@ -3144,6 +3686,12 @@ function playerView() {
           ${meetings ? `<th title="The same line, counting only matches against
             ${oppName}. Drawn from every match fetched, not the Matches filter,
             because two sides usually meet twice a season.">v ${oppName}</th>` : ""}
+          ${matchupOn ? `<th title="The other half of the case: what ${
+            escapeHtml(oppName)} have allowed in this stat to players of the
+            same position class, or for fouls what the players he will be
+            marking have drawn, over ${escapeHtml(oppName)}'s matches under
+            the same filters. Position is G, D, M or F only. Context: it is
+            not part of the price.">Matchup</th>` : ""}
           <th title="Price implied by the record and the model">Fair</th>
           <th title="Price the evidence supports">Need</th><th></th>
         </tr></thead>
@@ -4066,6 +4614,15 @@ def build_html(payload: dict) -> str:
     played under 45 minutes, because a bet on a player who does not appear is
     void rather than lost. Prices come from a rate per 90 multiplied by the
     minutes they are likely to get.
+    The Matchup column is the other half of each case: what the opponent has
+    allowed in that stat to players of the same position class, built from
+    every team's player records in this report, or for fouls what the players
+    he will be marking have drawn. SofaScore gives only G, D, M and F, so it
+    cannot tell a winger from a striker. The sample and coverage are printed
+    with it because not every match has the opposition's players on file, and
+    because records exist only for players still at their clubs, a match
+    rarely carries a full eleven. It is context beside the price, not part of
+    it.
   </p>
   <p class="note" id="pnote" hidden></p>
   <div id="players"></div>

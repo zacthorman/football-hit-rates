@@ -326,3 +326,327 @@ def price(
         "source": "model",
         "conflict": conflict,
     }
+
+
+# ------------------------------------------------------------ player pricing
+#
+# The player half of the model, mirrored from pricePlayer() and
+# positionPrior() in report.py's JS exactly as the team maths above mirrors
+# priceRow(). The team Platt correction in calibrate() is deliberately absent
+# here: it was fitted on team bets and nothing says it transfers. The player
+# path earned a correction of its own once backtest.py --players settled its
+# bets; see calibrate_player() below for what it covers and, just as
+# important, what it deliberately leaves alone.
+
+# Shrinkage of the ESTABLISHED player branch's stated log-odds, the same
+# Platt map the team path uses but with its own constants, fitted on player
+# bets only. Fitted by logistic regression of outcome on log-odds over the
+# 6,633 settled established player bets (source "model", 3+ appearances)
+# that `backtest.py --league "Premier League" --players` produces at the
+# production window of 38 matches, fixtures 2025-09-20 to 2026-08-30, run on
+# 2026-08-31. Those bets said 75.5% and landed 68.2%, optimistic in every
+# bucket; fitted on the season's earlier half it held on the later
+# (a=0.019, b=0.575), fitted on the later it held on the earlier (a=-0.053,
+# b=0.728), and carried to the Championship unseen it closed a -6.9 overall
+# gap to +0.6 and cut the Brier score from 0.2063 to 0.2014.
+#
+# It applies ONLY to the established branch. The thin blended branch was
+# measured nearly calibrated in the same run (PL said 62.2% landed 60.9%,
+# Championship said 64.2% landed 63.7%) and pushing it through this map made
+# it 4-5 points too cautious on the Championship, so it keeps its raw
+# numbers; the record-only fallback never goes through the count model and
+# stays raw for the same reason the team path leaves it raw. Refit if the
+# form window (`games` in update.json), MIN_MINUTES, or the player pricing
+# maths changes, exactly as with the team constants.
+PLAYER_CALIBRATION_A = -0.0045
+PLAYER_CALIBRATION_B = 0.6425
+
+
+def calibrate_player(p: float) -> float:
+    """The established player branch's stated probability, shrunk to what
+    bets stated like it actually landed at. Same shape as calibrate(), fitted
+    separately on player bets; see the constants above for the ledger."""
+    p = min(1 - 1e-9, max(1e-9, p))
+    z = PLAYER_CALIBRATION_A + PLAYER_CALIBRATION_B * math.log(p / (1 - p))
+    return 1 / (1 + math.exp(-z))
+
+
+# ------------------------------------------------------------ the scan gate
+#
+# Which player rows the bet scans are allowed to propose at all. The pricing
+# below answers "what is this bet worth"; the gate answers the prior
+# question, "is this record evidence of anything". They are different
+# questions and conflating them is the bug this section exists to fix.
+
+# Markets the player scan must never propose. The Players tab still shows
+# the underlying numbers -- the objection is to the tool recommending the
+# bet, not to the data existing -- and the custom builder will still price
+# one if asked, because a bet the user constructs is the user's own claim.
+#
+# Goals is excluded because the backtest proved the scan structurally
+# incapable of selecting skill there: the market's base rate is 9.5% per
+# appearance, and of 745 players with 10+ appearances not one sustained a
+# 65% scoring rate, so every record that cleared the old floor was a lucky
+# streak by construction. Quoted goals bets averaged an 82.5% pre-match
+# record and landed 21.8%, and the model had no ranking skill inside that
+# set (AUC 0.543). No gate rescues a market where the qualifying condition
+# cannot be met by ability, so the market is off the scan's menu entirely.
+PLAYER_SCAN_EXCLUDE = frozenset({"Goals"})
+
+# How much prior evidence the gate charges a record against, in
+# pseudo-appearances at the market's own base rate; see gate_rate(). Chosen
+# by replaying both leagues ungated and re-gating offline: m in {3..6} all
+# cut the weighted optimistic-market gap by a third to a half, m=5 was as
+# good as or better than its neighbours in both leagues while keeping 64%
+# (Premier League) and 70% (Championship) of the old gate's volume, and by
+# m=8 the volume cost steepened with no further calibration gain. Not a
+# per-market fit: one number, both leagues, chosen on aggregates.
+GATE_PRIOR_APPS = 5
+
+
+def gate_rate(hits: int, total: int, base: float) -> float:
+    """The hit rate the player scan gates on: the raw record shrunk towards
+    the market's own base rate by GATE_PRIOR_APPS pseudo-appearances.
+
+    The old gate compared hits/total against one fixed floor for every
+    market. For a market whose base rate sits far below the floor that
+    cannot select skill, only luck: nobody sustains 65% on goals, so every
+    goals record that qualified was a streak, and the same mechanism --
+    milder, but measured -- inflated shots on target and tackles over 1.5.
+    The overconfidence gap tracked exactly how far the floor sat above each
+    market's base rate, from -3 points on tackles over 0.5 to -25 on goals.
+
+    Shrinking the record towards the base rate before comparing makes the
+    floor relative: a player now qualifies on how far his record stands
+    above typical for THAT market, and the distance a short streak can
+    carry him shrinks with the market's base rate. A 4/4 run clears a 0.65
+    floor in a 60% market (shrunk 0.71) and fails it in a 25% market
+    (shrunk 0.58), which is the asymmetry the fixed floor lacked. Replayed
+    over both leagues this cut the calibration gap on every market the old
+    gate was optimistic about and threw away no market it was honest on;
+    the per-market ledger lives in backtest.py's player section.
+
+    `base` is the pooled rate at this line across every appearance in the
+    squad's own form window, computed by the caller from data available at
+    kick-off, so the gate needs no league table and introduces no lookahead.
+    """
+    if total + GATE_PRIOR_APPS <= 0:
+        return 0.0
+    return (hits + GATE_PRIOR_APPS * base) / (total + GATE_PRIOR_APPS)
+
+
+# Below this many minutes a record is a cameo, not an appearance. The page
+# voids a bet on a player who does not appear rather than settling it, so a
+# nine-minute run-out must not sit in his sample as a loss either.
+MIN_MINUTES = 45
+
+# Which team market stands behind each player stat. A player line's opponent
+# adjustment is borrowed from the team projection for the matching stat,
+# because there is no per-player projection and inventing one from a handful
+# of appearances would be noise wearing a decimal point.
+PLAYER_STAT_TO_TEAM = {
+    "Shots": "Total shots",
+    "Shots on target": "Shots on target",
+    "Tackles": "Tackles",
+    "Fouls": "Fouls",
+    "Goals": "Goals",
+}
+
+# Two full appearances' worth of prior evidence, in minutes. At one full
+# appearance the team-mates carry two thirds of the blended rate; at two it
+# is an even split; at three his own record takes over entirely, as it
+# always has.
+POOL_K = 2 * 90
+
+# How unlike each other players of one position class are, as a coefficient
+# of variation on the pooled rate. Team-mates are a proxy for the player,
+# not a measurement of him. A judgement call in report.py, not a fitted
+# number, and the same judgement call here.
+POOL_SPREAD = 0.5
+
+
+def appearances(played, stat, zero_fill=frozenset()):
+    """A player's usable records for one stat: real minutes, value resolved.
+
+    The zero-fill set is passed in rather than owned here because the list
+    already exists twice, in hitrates.py and in report.py's JS, and
+    verify.py polices that pair. A third copy would be a third thing to
+    drift. Callers hand in hitrates.PLAYER_ZERO_FILL.
+    """
+    out = []
+    for g in played:
+        if (g.get("minutes") or 0) < MIN_MINUTES:
+            continue
+        value = g.get("stats", {}).get(stat)
+        if value is None and stat in zero_fill:
+            value = 0
+        if value is None:
+            continue
+        out.append({"value": value, "minutes": g["minutes"]})
+    return out
+
+
+def position_prior(by_player, position, stat, exclude_name, zero_fill=frozenset()):
+    """The pooled per-90 rate for one stat among same-position team-mates.
+
+    The player himself is excluded, so his own thin record cannot vouch for
+    itself through the back door. Returns None when there is nobody to pool
+    from, and the caller's record fallback stands.
+    """
+    value = 0.0
+    minutes = 0.0
+    players = 0
+    mins = []
+    for name, played in by_player.items():
+        if name == exclude_name:
+            continue
+        if (played[0].get("position") or "") != position:
+            continue
+        apps = appearances(played, stat, zero_fill)
+        if not apps:
+            continue
+        players += 1
+        for a in apps:
+            value += a["value"]
+            minutes += a["minutes"]
+            mins.append(a["minutes"])
+    if not players or minutes <= 0:
+        return None
+    mins.sort()
+    return {
+        "per90": (value / minutes) * 90,
+        "value": value,
+        "minutes": minutes,
+        "players": players,
+        "medianMinutes": min(90, mins[len(mins) // 2]),
+    }
+
+
+def price_player(apps, line, over, adjustment, prior):
+    """Probability, fair price and the price to insist on, for a player line.
+
+    Three sources, in the same order the JS tries them. Under three
+    appearances the player's own per-90 rate is shrunk towards the
+    position prior with a weight built from his minutes, and the blended
+    rate goes through the same count-model path as everyone else; that is
+    the partial pooling that replaced the old raw Wilson fallback and its
+    one-size 4.84. With no appearances, no prior or a dead expectation the
+    record interval stands, marked as such. From three appearances his own
+    rate per 90, scaled to the minutes he is likely to get, is the model
+    path it has always been.
+    """
+    n = len(apps)
+    values = [a["value"] for a in apps]
+    hits = sum(1 for v in values if (v > line) == over)
+    total_minutes = sum(a["minutes"] for a in apps)
+    total_value = sum(values)
+
+    def record_only():
+        p = hits / n if n else 0.0
+        low = wilson_low(hits, n)
+        return {
+            "p": p,
+            "fair": 1 / p if p > 0 else math.inf,
+            "need": 1 / low if low > 0 else math.inf,
+            "expected": None,
+            "source": "record",
+            "hits": hits,
+            "n": n,
+        }
+
+    if n < 3:
+        if n and prior and total_minutes > 0:
+            w = total_minutes / (total_minutes + POOL_K)
+            own_per90 = (total_value / total_minutes) * 90
+            per90 = w * own_per90 + (1 - w) * prior["per90"]
+
+            # His own median minutes once he has two appearances to take one
+            # from; on a single appearance, the smaller of that match and the
+            # position's pooled median. Understating a nailed-on starter
+            # lengthens the price, which is the safe direction for overs.
+            sorted_minutes = sorted(a["minutes"] for a in apps)
+            own_median = min(90, sorted_minutes[n // 2])
+            expected_minutes = (
+                own_median if n >= 2
+                else min(own_median, prior.get("medianMinutes") or own_median)
+            )
+
+            expected = per90 * (expected_minutes / 90) * adjustment
+            if expected > 0:
+                # The blend's own uncertainty rides on the base distribution
+                # as extra variance, the same move predictive_ratio makes for
+                # a measured sample. The prior's error term carries
+                # POOL_SPREAD on top of its counting error, because a pooled
+                # team-mate rate can be precisely measured and still be the
+                # wrong player's number.
+                se_own = 90 * math.sqrt(max(total_value, 1)) / total_minutes
+                se_prior = 90 * math.sqrt(max(prior["value"], 1)) / prior["minutes"]
+                spread = POOL_SPREAD * prior["per90"]
+                se_per90 = math.sqrt(
+                    w * w * se_own * se_own
+                    + (1 - w) * (1 - w) * (se_prior * se_prior + spread * spread)
+                )
+                se = se_per90 * (expected_minutes / 90) * adjustment
+                wide = (expected + se * se) / expected
+
+                p = prob_over(line, expected, values)
+                widened = prob_over(line, expected, values, ratio=wide)
+                if not over:
+                    p = 1 - p
+                    widened = 1 - widened
+                p_low = min(p, widened)
+
+                return {
+                    "p": p,
+                    "fair": 1 / p if p > 0 else math.inf,
+                    "need": 1 / max(p_low, 0.01),
+                    "expected": expected,
+                    "source": "blend",
+                    "hits": hits,
+                    "n": n,
+                    "per90": per90,
+                    "expected_minutes": expected_minutes,
+                    "minutes": total_minutes,
+                    "blend": {"w": w, "prior": prior},
+                }
+
+        return record_only()
+
+    if total_minutes <= 0 or total_value <= 0:
+        return record_only()
+
+    # Rate per 90, scaled to the minutes he is likely to get. Median rather
+    # than mean minutes, so one early substitution does not decide it.
+    sorted_minutes = sorted(a["minutes"] for a in apps)
+    expected_minutes = min(90, sorted_minutes[n // 2])
+    per90 = (total_value / total_minutes) * 90
+    expected = per90 * (expected_minutes / 90) * adjustment
+
+    wide = predictive_ratio(values, expected)
+    p = prob_over(line, expected, values)
+    widened = prob_over(line, expected, values, ratio=wide)
+    if not over:
+        p = 1 - p
+        widened = 1 - widened
+    p_low = min(p, widened)
+
+    # Calibration last, to the quoted numbers only, as on the team path: both
+    # p and the widened probability pass through the same monotone map, so
+    # `need` keeps its place on the pessimistic side of `fair`. Only this
+    # branch -- the blend and record branches above quote raw numbers on
+    # purpose; see calibrate_player().
+    p = calibrate_player(p)
+    p_low = calibrate_player(p_low)
+
+    return {
+        "p": p,
+        "fair": 1 / p if p > 0 else math.inf,
+        "need": 1 / max(p_low, 0.01),
+        "expected": expected,
+        "source": "model",
+        "hits": hits,
+        "n": n,
+        "per90": per90,
+        "expected_minutes": expected_minutes,
+        "minutes": total_minutes,
+    }

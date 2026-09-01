@@ -21,6 +21,7 @@ failing, because a missing tool is not a broken model.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -54,7 +55,8 @@ def extract_js() -> str:
     js = report.JS
     wanted = ["logGamma", "poissonCdf", "negBinCdf", "logChoose", "binomCdf",
               "dispersion", "predictiveRatio", "probOver", "wilsonLow",
-              "calibrate"]
+              "calibrate", "calibratePlayer", "appearances",
+              "positionPrior", "pricePlayer", "gateRate"]
 
     out = []
     for name in wanted:
@@ -81,8 +83,36 @@ def extract_js() -> str:
     if not cal:
         raise SystemExit("could not find the calibration constants in report.py's JS")
 
+    player_cal = re.search(
+        r"const PLAYER_CALIBRATION_A = [-\d.]+;\s*\n"
+        r"const PLAYER_CALIBRATION_B = [-\d.]+;", js)
+    if not player_cal:
+        raise SystemExit(
+            "could not find the player calibration constants in report.py's JS")
+
+    # The player-pricing constants, again by name. POOL_K is written as an
+    # expression (2 * 90) in the JS and stays one here: node evaluates it
+    # exactly as the page does, so a change to either factor flows through.
+    # fairOdds is a one-liner, which the block regex above would overrun,
+    # so it gets a line-bounded pattern of its own.
+    player_bits = []
+    for pattern, label in [
+        (r"const MIN_MINUTES = \d+;", "MIN_MINUTES"),
+        (r"const GATE_PRIOR_APPS = \d+;", "GATE_PRIOR_APPS"),
+        (r"const POOL_K = [^;\n]+;", "POOL_K"),
+        (r"const POOL_SPREAD = [\d.]+;", "POOL_SPREAD"),
+        (r"const ZERO_FILL = new Set\(\[.*?\]\);", "ZERO_FILL"),
+        (r"function fairOdds\([^\n]*", "fairOdds"),
+    ]:
+        found = re.search(pattern, js, re.S)
+        if not found:
+            raise SystemExit(f"could not find {label} in report.py's JS")
+        player_bits.append(found.group(0))
+
     return (constants.group(0) + "\n" + prior.group(0) + "\n"
-            + cal.group(0) + "\n" + "\n".join(out))
+            + cal.group(0) + "\n" + player_cal.group(0) + "\n"
+            + "\n".join(player_bits) + "\n"
+            + "\n".join(out))
 
 
 def run_js(cases: list[dict]) -> list[dict]:
@@ -93,6 +123,9 @@ const out = cases.map(c => ({
   probWide: probOver(c.line, c.mean, c.values, predictiveRatio(c.values, c.mean)),
   wilson: wilsonLow(c.hits, c.total),
   calibrated: calibrate(probOver(c.line, c.mean, c.values)),
+  playerCalibrated: calibratePlayer(probOver(c.line, c.mean, c.values)),
+  gateLow: gateRate(c.hits, c.total, 0.095),
+  gateHigh: gateRate(c.hits, c.total, 0.624),
 }));
 console.log(JSON.stringify(out));
 """
@@ -405,8 +438,299 @@ def check_new_panels() -> None:
     print("players: thin samples shown and flagged, not hidden")
 
 
+# ------------------------------------------------------------ player pricing
+
+
+def check_player_stat_map() -> None:
+    """The player-stat to team-market mapping exists in both copies and agrees.
+
+    backtest.py borrows a player line's opponent adjustment from the team
+    projection through model.PLAYER_STAT_TO_TEAM, and the page does the same
+    through its JS twin. A stat added to one copy but not the other would
+    fail nowhere: the backtest would just measure a different set of markets
+    from the ones the site prices, which is the 10-versus-38 mistake again
+    wearing a different hat.
+    """
+    match = re.search(r"const PLAYER_STAT_TO_TEAM = \{(.*?)\};", report.JS, re.S)
+    if not match:
+        raise SystemExit("could not find PLAYER_STAT_TO_TEAM in report.py's JS")
+    js = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', match.group(1)))
+
+    if js != model.PLAYER_STAT_TO_TEAM:
+        print("PLAYER_STAT_TO_TEAM disagrees between model.py and report.py:")
+        for key in sorted(set(js) | set(model.PLAYER_STAT_TO_TEAM)):
+            if js.get(key) != model.PLAYER_STAT_TO_TEAM.get(key):
+                print(f"  {key}: js={js.get(key)!r} "
+                      f"python={model.PLAYER_STAT_TO_TEAM.get(key)!r}")
+        sys.exit(1)
+
+    print(f"player stat map agrees, {len(js)} stats")
+
+
+def check_player_gate() -> None:
+    """The scan gate exists in both copies, agrees, and is actually wired.
+
+    Three things can silently rot here. The exclusion set could drift, so
+    the page stops proposing goals while the backtest keeps settling them
+    and every player-market aggregate means something different on each
+    side. GATE_PRIOR_APPS could be re-tuned in one file only, which moves
+    which records qualify -- the population itself -- not just a price.
+    And either scan could stop calling the gate while both files still
+    compile, which is how the old raw floor would sneak back in.
+    """
+    js = report.JS
+
+    match = re.search(r"const PLAYER_SCAN_EXCLUDE = new Set\(\[(.*?)\]\);", js)
+    if not match:
+        raise SystemExit("could not find PLAYER_SCAN_EXCLUDE in report.py's JS")
+    js_set = set(re.findall(r'"([^"]+)"', match.group(1)))
+    if js_set != set(model.PLAYER_SCAN_EXCLUDE):
+        print("PLAYER_SCAN_EXCLUDE disagrees between model.py and report.py:")
+        for name in sorted(js_set ^ set(model.PLAYER_SCAN_EXCLUDE)):
+            where = "report.py" if name in js_set else "model.py"
+            print(f"  only in {where}: {name}")
+        sys.exit(1)
+
+    prior = re.search(r"const GATE_PRIOR_APPS = (\d+);", js)
+    if not prior:
+        raise SystemExit("could not find GATE_PRIOR_APPS in report.py's JS")
+    if int(prior.group(1)) != model.GATE_PRIOR_APPS:
+        print(f"GATE_PRIOR_APPS disagrees: js={prior.group(1)} "
+              f"python={model.GATE_PRIOR_APPS}")
+        sys.exit(1)
+
+    scan = re.search(r"function scanPlayerBets\(.*?\n\}", js, re.S)
+    if not scan:
+        raise SystemExit("could not find scanPlayerBets in report.py's JS")
+    for needle, why in [
+        ("PLAYER_SCAN_EXCLUDE.has(stat)", "the exclusion set"),
+        ("gateRate(", "the shrunk-rate gate"),
+    ]:
+        if needle not in scan.group(0):
+            print(f"gate: scanPlayerBets no longer uses {why}")
+            sys.exit(1)
+    if "vals.length < MATCHUP_FLOOR" in scan.group(0):
+        print("gate: scanPlayerBets still gates on the raw hit rate")
+        sys.exit(1)
+
+    bt = (ROOT / "backtest.py").read_text(encoding="utf-8")
+    for needle, why in [
+        ("model.PLAYER_SCAN_EXCLUDE", "the exclusion set"),
+        ("model.gate_rate(", "the shrunk-rate gate"),
+    ]:
+        if needle not in bt:
+            print(f"gate: backtest.py's player scan no longer uses {why}")
+            sys.exit(1)
+
+    print(f"player scan gate agrees: {sorted(js_set)} excluded, "
+          f"prior apps {model.GATE_PRIOR_APPS}, both scans wired")
+
+
+def _player_cases() -> list[dict]:
+    """Synthetic squads that reach every branch of the player pricing.
+
+    Thin samples of one and two appearances, a player whose only outing was
+    a cameo, the 45-minute boundary itself, a record with the stat key
+    missing so the zero-fill has to fire, a stat outside the zero-fill set
+    so it must not, a squad with no same-position team-mates, a prior whose
+    pooled rate is zero, mates who only ever play a half, and well-evidenced
+    samples for the established path. Each is crossed with lines from short
+    to long, both directions, and adjustments either side of 1.
+    """
+    def rec(minutes, shots=None, position="F", passes=30):
+        stats = {"Minutes": minutes}
+        if shots is not None:
+            stats["Shots"] = shots
+        if passes is not None:
+            stats["Passes"] = passes
+        return {"position": position, "minutes": minutes, "stats": stats}
+
+    mates = {
+        "mate_a": [rec(90, 2), rec(85, 1), rec(90, 3)],
+        "mate_b": [rec(90, 0), rec(72, 1)],
+        "mate_c": [rec(45, 1)],
+        "mate_cameo": [rec(20, 4)],
+        "mate_def": [rec(90, 5, position="D")],
+    }
+
+    boards = {
+        "one_full": ("Shots", {**mates, "him": [rec(90, 1)]}),
+        "one_cameo": ("Shots", {**mates, "him": [rec(30, 2)]}),
+        "one_boundary": ("Shots", {**mates, "him": [rec(45, 1)]}),
+        "two": ("Shots", {**mates, "him": [rec(90, 2), rec(45, 0)]}),
+        "two_zero_fill": ("Shots", {**mates, "him": [rec(90, 1), rec(67)]}),
+        "two_cameos": ("Shots", {**mates, "him": [rec(30, 1), rec(20, 2)]}),
+        "three": ("Shots", {**mates,
+                            "him": [rec(90, 1), rec(88, 2), rec(90, 0)]}),
+        "three_blank": ("Shots", {**mates,
+                                  "him": [rec(90, 0), rec(90, 0), rec(90, 0)]}),
+        "five": ("Shots", {**mates,
+                           "him": [rec(90, 2), rec(90, 3), rec(85, 1),
+                                   rec(90, 4), rec(70, 2)]}),
+        "no_position_mates": ("Shots", {"mate_def": mates["mate_def"],
+                                        "him": [rec(90, 1)]}),
+        "zero_prior": ("Shots", {"z1": [rec(90, 0), rec(90, 0)],
+                                 "z2": [rec(88, 0)],
+                                 "him": [rec(90, 0)]}),
+        "half_time_mates": ("Shots", {"s1": [rec(45, 1), rec(45, 2)],
+                                      "s2": [rec(45, 1)],
+                                      "him": [rec(90, 3)]}),
+        "no_fill_stat": ("Passes", {**mates,
+                                    "him": [rec(90, 1, passes=40),
+                                            rec(80, 2, passes=None)]}),
+    }
+
+    cases = []
+    for name, (stat, by_player) in boards.items():
+        for line in (0.5, 1.5, 2.5):
+            for over in (True, False):
+                for adjustment in (0.6, 1.0, 1.75):
+                    cases.append({
+                        "name": name, "stat": stat, "player": "him",
+                        "position": "F", "line": line, "over": over,
+                        "adjustment": adjustment, "byPlayer": by_player,
+                    })
+    return cases
+
+
+def check_player_pricing() -> None:
+    """pricePlayer and positionPrior agree between the two implementations.
+
+    The blend branch is new and completely unmeasured, which makes this the
+    check that matters most: backtest.py hangs calibration numbers on that
+    branch, and if the Python copy drifts from the JS the backtest is
+    grading an implementation the site does not run. Every constant the
+    branch uses reaches the harness out of report.py by name, so a change
+    there that forgets model.py fails here instead of lying quietly.
+    """
+    cases = _player_cases()
+
+    script = extract_js() + """
+const fs = require("fs");
+const cases = JSON.parse(fs.readFileSync(0, "utf8"));
+const strip = (k, v) => (typeof v === "number" && !isFinite(v)) ? "inf" : v;
+const out = cases.map(c => {
+  const byPlayer = new Map(Object.entries(c.byPlayer));
+  const prior = positionPrior(byPlayer, c.position, c.stat, c.player);
+  const apps = appearances(byPlayer.get(c.player) || [], c.stat);
+  const price = pricePlayer(apps, c.line, c.over, c.adjustment, prior);
+  return JSON.parse(JSON.stringify({ prior: prior || null, price }, strip));
+});
+console.log(JSON.stringify(out));
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+        handle.write(script)
+        path = handle.name
+
+    # Cases go over stdin rather than argv: a few hundred squads is more
+    # than an argument list is guaranteed to hold.
+    result = subprocess.run(["node", path], input=json.dumps(cases),
+                            capture_output=True, text=True)
+    Path(path).unlink()
+    if result.returncode != 0:
+        raise SystemExit(f"node failed:\n{result.stderr}")
+    js_results = json.loads(result.stdout)
+
+    zero_fill = hitrates.PLAYER_ZERO_FILL
+    worst = 0.0
+    failures: list[str] = []
+    covered: dict[str, int] = {}
+
+    def gap(a, b):
+        """Difference between two maybe-missing, maybe-infinite numbers,
+        or None when they cannot be compared as equals at all."""
+        if b == "inf":
+            b = math.inf
+        if a is None and b is None:
+            return 0.0
+        if a is None or b is None:
+            return None
+        if math.isinf(a) or math.isinf(b):
+            return 0.0 if a == b else None
+        return abs(a - b)
+
+    for case, js in zip(cases, js_results):
+        prior = model.position_prior(case["byPlayer"], case["position"],
+                                     case["stat"], case["player"], zero_fill)
+        apps = model.appearances(case["byPlayer"].get(case["player"]) or [],
+                                 case["stat"], zero_fill)
+        price = model.price_player(apps, case["line"], case["over"],
+                                   case["adjustment"], prior)
+        covered[price["source"]] = covered.get(price["source"], 0) + 1
+
+        problems = []
+        js_price = js["price"]
+
+        if price["source"] != js_price.get("source"):
+            problems.append(
+                f"source {price['source']} vs {js_price.get('source')}")
+        if (price["hits"] != js_price.get("hits")
+                or price["n"] != js_price.get("n")):
+            problems.append("hits/n")
+
+        for py_key, js_key in [("p", "p"), ("fair", "fair"), ("need", "need"),
+                               ("expected", "expected"), ("per90", "per90"),
+                               ("expected_minutes", "expectedMinutes"),
+                               ("minutes", "minutes")]:
+            d = gap(price.get(py_key), js_price.get(js_key))
+            if d is None or d > TOLERANCE:
+                problems.append(f"{py_key} {price.get(py_key)}"
+                                f" vs {js_price.get(js_key)}")
+            else:
+                worst = max(worst, d)
+
+        js_prior = js.get("prior")
+        if (prior is None) != (js_prior is None):
+            problems.append("prior presence differs")
+        elif prior is not None:
+            if prior["players"] != js_prior.get("players"):
+                problems.append("prior.players")
+            for key in ("per90", "value", "minutes", "medianMinutes"):
+                d = gap(prior.get(key), js_prior.get(key))
+                if d is None or d > TOLERANCE:
+                    problems.append(f"prior.{key}")
+                else:
+                    worst = max(worst, d)
+
+        blend_py, blend_js = price.get("blend"), js_price.get("blend")
+        if (blend_py is None) != (blend_js is None):
+            problems.append("blend presence differs")
+        elif blend_py is not None:
+            d = gap(blend_py["w"], blend_js.get("w"))
+            if d is None or d > TOLERANCE:
+                problems.append("blend.w")
+            else:
+                worst = max(worst, d)
+
+        if problems:
+            failures.append(
+                f"  {case['name']} line={case['line']} over={case['over']} "
+                f"adj={case['adjustment']}: " + ", ".join(problems))
+
+    mix = ", ".join(f"{v} {k}" for k, v in sorted(covered.items()))
+    print(f"\nplayer pricing: checked {len(cases)} cases ({mix})")
+    print(f"  worst numeric difference: {worst:.2e}")
+
+    # The grid is only worth its runtime if it still reaches every branch;
+    # a refactor that quietly routed everything to one source would leave
+    # the other two unguarded while this check kept passing.
+    if not {"blend", "model", "record"} <= set(covered):
+        print("player pricing: the case grid no longer reaches every source")
+        sys.exit(1)
+
+    if failures:
+        print(f"\nPLAYER PRICING MISMATCH in {len(failures)} case(s):")
+        for line in failures[:10]:
+            print(line)
+        sys.exit(1)
+
+    print("  pricePlayer and positionPrior agree.")
+
+
 def main() -> None:
     check_zero_fill()
+    check_player_stat_map()
+    check_player_gate()
     check_slip_input()
     check_new_panels()
     check_rating_pools()
@@ -430,7 +754,8 @@ def main() -> None:
 
     js_results = run_js(cases)
 
-    worst_prob = worst_wilson = worst_cal = 0.0
+    worst_prob = worst_wilson = worst_cal = worst_pcal = 0.0
+    worst_gate = 0.0
     failures = []
 
     for case, js in zip(cases, js_results):
@@ -454,8 +779,28 @@ def main() -> None:
         d_cal = abs(model.calibrate(py_prob) - js["calibrated"])
         worst_cal = max(worst_cal, d_cal)
 
+        # The player calibration is the same trap with its own constants: a
+        # refit that edits one file's pair and not the other's would move
+        # every established player price on the site while both files still
+        # ran perfectly. The constants reach the harness out of report.py by
+        # name, so the comparison is always against what the page ships.
+        d_pcal = abs(model.calibrate_player(py_prob) - js["playerCalibrated"])
+        worst_pcal = max(worst_pcal, d_pcal)
+
+        # The scan gate, at a rare-event base rate and a common one. The
+        # gate decides which player rows exist at all, so the two copies
+        # drifting would mean the backtest measures a different population
+        # from the one the page quotes -- the selection bug reborn.
+        d_gate = max(
+            abs(model.gate_rate(case["hits"], case["total"], 0.095)
+                - js["gateLow"]),
+            abs(model.gate_rate(case["hits"], case["total"], 0.624)
+                - js["gateHigh"]))
+        worst_gate = max(worst_gate, d_gate)
+
         if (d_prob > TOLERANCE or d_wilson > TOLERANCE or d_wide > TOLERANCE
-                or d_cal > TOLERANCE):
+                or d_cal > TOLERANCE or d_pcal > TOLERANCE
+                or d_gate > TOLERANCE):
             failures.append(
                 f"  mean={case['mean']} line={case['line']} sample={case['sample']}: "
                 f"python {py_prob:.12f} vs js {js['probOver']:.12f}"
@@ -465,12 +810,16 @@ def main() -> None:
     print(f"  worst probOver  difference: {worst_prob:.2e}")
     print(f"  worst wilsonLow difference: {worst_wilson:.2e}")
     print(f"  worst calibrate difference: {worst_cal:.2e}")
+    print(f"  worst calibratePlayer difference: {worst_pcal:.2e}")
+    print(f"  worst gateRate difference: {worst_gate:.2e}")
 
     if failures:
         print(f"\nMISMATCH in {len(failures)} case(s):")
         for line in failures[:10]:
             print(line)
         sys.exit(1)
+
+    check_player_pricing()
 
     print("\nmodel.py and report.py agree.")
 

@@ -4,6 +4,7 @@ Does the model actually know anything? Settle every bet it would have made.
     python backtest.py --league "Premier League"
     python backtest.py --league "Premier League" --from 2025-10-01 --games 10
     python backtest.py --leagues "Premier League,Championship,LaLiga"
+    python backtest.py --league "Premier League" --players
 
 Walks past fixtures, rebuilds what the tool would have said the day before
 each one, takes every bet the Best bets scan would have produced, and settles
@@ -23,6 +24,14 @@ kick-off, so the model can only see matches played earlier. Without that the
 model reads the result of the match it is predicting, the output looks
 extraordinary, and it means precisely nothing. That is lookahead bias and it
 is the standard way a backtest flatters itself.
+
+Player bets are opt-in via --players, so the team-only behaviour every
+existing number was produced under stays the default. They settle with two
+extra rules of their own: the lineup of the match being predicted is read
+only to settle the bet, never to price it, and a player who does not appear
+-- or plays under the page's 45-minute appearance bar -- is VOID rather
+than lost, exactly as a bookmaker would grade it. Voids are counted and
+reported, not buried.
 """
 
 from __future__ import annotations
@@ -88,13 +97,17 @@ def cached_only(path: str, max_age_hours=None):
 
 
 class Backtester:
-    def __init__(self, tournament_id: int, games: int, verbose: bool = True):
+    def __init__(self, tournament_id: int, games: int, verbose: bool = True,
+                 players: bool = False):
         self.tournament_id = tournament_id
         self.games = games
         self.verbose = verbose
+        self.players = players
         self.ratings_cache: dict = {}
         self.skipped = 0
+        self.player_skipped = 0
         self.rows: list[dict] = []
+        self.player_rows: list[dict] = []
 
     # ---------------------------------------------------------------- data
 
@@ -196,6 +209,9 @@ class Backtester:
                     self.candidate(side, stat, period, suggested, records,
                                    projection, truth, event)
 
+        if self.players:
+            self.player_bets(event, records, projection)
+
     def candidate(self, side, stat, period, suggested, records, projection,
                   truth, event) -> None:
         """One team, one stat, one period: every line and direction it offers."""
@@ -260,6 +276,206 @@ class Backtester:
                 })
 
 
+    # --------------------------------------------------------- player bets
+
+    def player_form(self, team_id: int, before: float) -> list[dict]:
+        """One record per player per match, strictly before kick-off.
+
+        current_squad_only is off, deliberately, where the production build
+        leaves it on. Today's squad is information from after the fixtures
+        being replayed: judged from March, a player who left in June was
+        still there, and filtering him out with knowledge of the transfer
+        is a small lookahead of its own. Keeping everyone who actually
+        played is the season-correct view, and a bet on someone who later
+        moved settles as void anyway when he is not in the lineup.
+        """
+        return hitrates.player_form(
+            team_id=team_id, team_name=str(team_id),
+            tournament_id=self.tournament_id, limit=self.games,
+            verbose=False, current_squad_only=False, before=before,
+        )
+
+    def player_adjustment(self, stat, team_index, records, projection) -> float:
+        """playerAdjustment() from the page, fed the backtest's own inputs.
+
+        The team projection for the paired market over the team's own mean,
+        clipped only against a near-zero denominator. When the fixture has
+        no projection the answer is 1, which is also what the page does
+        when a report carries none.
+        """
+        team_stat = model.PLAYER_STAT_TO_TEAM.get(stat)
+        if not team_stat:
+            return 1.0
+        pair = (projection.get("ALL") or {}).get(team_stat)
+        if not pair or pair[team_index] is None:
+            return 1.0
+        values = [r["stats"].get("ALL", {}).get(team_stat)
+                  for r in records[team_index]]
+        values = [v for v in values if v is not None]
+        if len(values) < 3:
+            return 1.0
+        mean = sum(values) / len(values)
+        if mean <= 0:
+            return 1.0
+        return min(2.5, max(0.2, pair[team_index] / mean))
+
+    def player_bets(self, event, records, projection) -> None:
+        """Price and settle every player line the page would have quoted.
+
+        Mirrors scanPlayerBets(): overs only, at the suggested line, gated
+        on the record -- shrunk towards the market's own base rate by
+        model.gate_rate() -- clearing MATCHUP_FLOOR, priced through
+        pricePlayer with the positional prior. Goals is excluded here
+        exactly as on the page, and for the reason measured by this very
+        tool: no player sustains a scoring rate any floor would accept, so
+        every goals record that qualified was a lucky streak, and the
+        quoted set landed 21.8% against an 82.5% average pre-match record. Two deliberate departures, both in the
+        direction of measuring more rather than less: no minimum
+        appearances, because the thin blended branch is the thing this
+        exists to measure and the scan's default minimum of four would
+        never reach it; and no three-per-fixture cap, because the cap is
+        page furniture and every priced row is a data point here.
+
+        The asymmetry that keeps this honest: the lineup of the match being
+        predicted is read once, into `lineups`, and nothing derived from it
+        touches a price -- it exists only to settle. Form, lines, priors and
+        adjustments are all built from player_form called with
+        before=kick-off, which filters strictly earlier, and the assertions
+        below turn any leak of the fixture's own match id into a crash
+        rather than a quietly flattering number.
+        """
+        kickoff = event["startTimestamp"]
+        try:
+            lineups = cached_only(f"event/{event['id']}/lineups")
+        except Skipped:
+            self.player_skipped += 1
+            return
+
+        squads = [
+            self.player_form(event["homeTeam"]["id"], kickoff),
+            self.player_form(event["awayTeam"]["id"], kickoff),
+        ]
+        if not any(squads):
+            return
+
+        stats = hitrates.player_stat_names(*squads, bettable_only=True)
+        lines = hitrates.suggest_player_lines(squads, stats)
+
+        for team_index in (0, 1):
+            recs = squads[team_index]
+            if not recs:
+                continue
+
+            # The same match window the team scan uses, venue pooled: a
+            # player's sample does not survive being halved by venue.
+            allowed = {r["id"] for r in records[team_index]}
+            assert event["id"] not in allowed, \
+                "form window contains the fixture being predicted"
+            assert all(r["match_id"] != event["id"] for r in recs), \
+                "player form contains the fixture being predicted"
+
+            by_player: dict[str, list[dict]] = {}
+            for r in recs:
+                if r["match_id"] in allowed:
+                    by_player.setdefault(r["player"], []).append(r)
+
+            side = "home" if team_index == 0 else "away"
+
+            for stat in stats:
+                if stat not in model.PLAYER_STAT_TO_TEAM:
+                    continue
+                if stat in model.PLAYER_SCAN_EXCLUDE:
+                    continue
+                line = lines.get(stat)
+                if line is None:
+                    continue
+                adjustment = self.player_adjustment(
+                    stat, team_index, records, projection)
+
+                # The market's own base rate at this line: every appearance
+                # by every player in this squad's window, the population a
+                # record must stand out from before the gate lets it in.
+                base_k = base_n = 0
+                apps_by_name: dict[str, list[dict]] = {}
+                for name, played in by_player.items():
+                    apps = model.appearances(
+                        played, stat, hitrates.PLAYER_ZERO_FILL)
+                    apps_by_name[name] = apps
+                    for a in apps:
+                        base_n += 1
+                        if a["value"] > line:
+                            base_k += 1
+                base = base_k / base_n if base_n else 0.0
+
+                for name, played in by_player.items():
+                    apps = apps_by_name[name]
+                    if not apps:
+                        continue
+                    vals = [a["value"] for a in apps]
+                    hits = sum(1 for v in vals if v > line)
+                    if model.gate_rate(hits, len(vals), base) \
+                            < model.MATCHUP_FLOOR:
+                        continue
+
+                    prior = model.position_prior(
+                        by_player, played[0].get("position") or "", stat,
+                        name, hitrates.PLAYER_ZERO_FILL)
+                    priced = model.price_player(
+                        apps, line, True, adjustment, prior)
+                    if not math.isfinite(priced["fair"]):
+                        continue
+
+                    result = self.settle_player(
+                        lineups, side, played[0].get("player_id"), stat, line)
+
+                    self.player_rows.append({
+                        "date": datetime.fromtimestamp(
+                            kickoff, tz=timezone.utc).strftime("%Y-%m-%d"),
+                        "fixture": (f"{event['homeTeam']['name']} v "
+                                    f"{event['awayTeam']['name']}"),
+                        "team": event[
+                            "homeTeam" if team_index == 0 else "awayTeam"
+                        ]["name"],
+                        "player": name,
+                        "stat": stat, "line": line, "over": True,
+                        "apps": len(vals),
+                        "p_model": priced["p"],
+                        "p_record": hits / len(vals),
+                        "source": priced["source"],
+                        "need": priced["need"],
+                        "result": result,
+                        "won": result == "won",
+                    })
+
+    def settle_player(self, lineups, side, player_id, stat, line) -> str:
+        """won, lost, or void, by the page's own appearance rule.
+
+        A bet on a player who does not appear is void, not lost: the
+        bookmaker refunds it and it is not an event. The page's bar for an
+        appearance is MIN_MINUTES, below which a record is a cameo, and
+        settlement uses the same bar so the backtest grades bets the way
+        the sample that priced them was built. The stat value goes through
+        _player_stat_values, the same zero-fill as everywhere else: a
+        player who appeared and has no key for a counting stat did none of
+        it, and that is a settled loss on an over, not a void.
+        """
+        entries = (lineups.get(side) or {}).get("players") or []
+        entry = next(
+            (e for e in entries
+             if (e.get("player") or {}).get("id") == player_id), None)
+        if entry is None:
+            return "void_absent"
+        values = hitrates._player_stat_values(entry.get("statistics") or {})
+        if not values:
+            return "void_absent"
+        if values.get("Minutes", 0) < model.MIN_MINUTES:
+            return "void_cameo"
+        actual = values.get(stat)
+        if actual is None:
+            return "void_absent"
+        return "won" if actual > line else "lost"
+
+
 # ------------------------------------------------------------------ report
 
 
@@ -312,6 +528,16 @@ def main() -> None:
     parser.add_argument("--from", dest="since", default=None,
                         help="only fixtures on or after this date, YYYY-MM-DD")
     parser.add_argument("--csv", help="write every settled bet to this file")
+    # Off by default on purpose: every calibration number ever quoted from
+    # this tool, including the fitted CALIBRATION constants, came from the
+    # team-only run, and a default that silently widened the population
+    # would change what those numbers mean without anyone deciding it.
+    parser.add_argument("--players", action="store_true",
+                        help="also price and settle player bets, reported "
+                             "separately (team-only output is unchanged)")
+    parser.add_argument("--player-csv",
+                        help="write every player bet, voids included, "
+                             "to this file")
     args = parser.parse_args()
 
     # Nothing below this line may touch the network.
@@ -327,7 +553,9 @@ def main() -> None:
 
     since = parse_date(args.since) if args.since else 0
     all_rows: list[dict] = []
+    all_player_rows: list[dict] = []
     total_skipped = 0
+    player_skipped = 0
 
     for name in wanted:
         key = name.lower().replace("-", "_").replace(" ", "_")
@@ -348,7 +576,7 @@ def main() -> None:
             print("  could not read the team list from cache, skipping")
             continue
 
-        tester = Backtester(tournament_id, args.games)
+        tester = Backtester(tournament_id, args.games, players=args.players)
 
         def competition_of(event: dict):
             return (event.get("tournament", {})
@@ -428,9 +656,13 @@ def main() -> None:
             if i % 10 == 0:
                 print(f"    {i}/{len(replay)}, {len(tester.rows)} bets settled", end="\r")
 
-        print(f"    {len(replay)}/{len(replay)}, {len(tester.rows)} bets settled     ")
+        note = (f", {len(tester.player_rows)} player rows"
+                if args.players else "")
+        print(f"    {len(replay)}/{len(replay)}, {len(tester.rows)} bets settled{note}     ")
         all_rows.extend(tester.rows)
+        all_player_rows.extend(tester.player_rows)
         total_skipped += tester.skipped
+        player_skipped += tester.player_skipped
 
     if not all_rows:
         raise SystemExit(
@@ -470,6 +702,59 @@ def main() -> None:
         print("  The model is too cautious. It is leaving value on the table.")
     else:
         print("  Calibrated to within two points. The prices mean what they say.")
+
+    if all_player_rows:
+        settled = [r for r in all_player_rows if r["result"] in ("won", "lost")]
+        absent = sum(1 for r in all_player_rows if r["result"] == "void_absent")
+        cameo = sum(1 for r in all_player_rows if r["result"] == "void_cameo")
+
+        print(f"\n\n{'=' * 62}")
+        print(f"PLAYER BETS: {len(settled)} settled, {absent + cameo} void "
+              f"({absent} did not appear, {cameo} under "
+              f"{model.MIN_MINUTES} minutes)"
+              + (f", {player_skipped} fixture(s) without a cached lineup"
+                 if player_skipped else ""))
+        print("=" * 62)
+        print("  A void is a bookmaker's refund, not a loss or a win. Voids")
+        print("  are excluded from every table below and counted here only.")
+
+        if settled:
+            below = sum(1 for r in settled if r["p_model"] < BUCKETS[0][0])
+            if below:
+                print(f"\n  {below} settled bet(s) priced under "
+                      f"{BUCKETS[0][0]:.0%} sit outside the bucket table but "
+                      f"inside every Brier score.")
+
+            calibration(settled, "p_model", "ALL PLAYER BETS")
+
+            thin = [r for r in settled if r["source"] == "blend"]
+            if thin:
+                calibration(thin, "p_model",
+                            "THIN PLAYER BETS, blended prior (under 3 "
+                            "appearances) -- today's change")
+            established = [r for r in settled if r["source"] == "model"]
+            if established:
+                calibration(established, "p_model",
+                            "ESTABLISHED PLAYER BETS, own record (3+ "
+                            "appearances)")
+            record = [r for r in settled if r["source"] == "record"]
+            if record:
+                calibration(record, "p_model",
+                            "RECORD-ONLY PLAYER BETS, no prior to blend")
+
+            said = sum(r["p_model"] for r in settled) / len(settled)
+            landed = sum(1 for r in settled if r["won"]) / len(settled)
+            print(f"\n  Player bets overall: said {said:.1%}, "
+                  f"landed {landed:.1%} of settled bets")
+
+    if args.player_csv and all_player_rows:
+        import csv
+        with open(args.player_csv, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle,
+                                    fieldnames=list(all_player_rows[0]))
+            writer.writeheader()
+            writer.writerows(all_player_rows)
+        print(f"\n  Every player bet written to {args.player_csv}")
 
     if args.csv:
         import csv

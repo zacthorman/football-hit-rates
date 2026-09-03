@@ -685,7 +685,18 @@ def build(
         slug = first["competition"]
     else:
         slug = f"mixed-{first['home']}"
-    slug = "".join(c for c in slug.lower().replace(" ", "-") if c.isalnum() or c == "-")
+    # Accents are folded to ASCII before the filter, not left to isalnum.
+    #
+    # Python counts an accented letter as alphanumeric, so Brazil's league
+    # wrote brasileirao-betano.html with a tilde in the filename. It serves,
+    # but it has to be percent-encoded in a URL, which makes a link that
+    # survives being copied into a message a matter of luck. The rest of this
+    # function exists to give each league one stable URL; a character that
+    # renders differently depending on who is handling it works against that.
+    import unicodedata
+    folded = unicodedata.normalize("NFKD", slug.lower().replace(" ", "-"))
+    slug = "".join(c for c in folded
+                   if (c.isalnum() and not unicodedata.combining(c)) or c == "-")
 
     path = OUT_DIR / f"{slug}.html"
     report.write_report(payload, path)

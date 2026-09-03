@@ -451,7 +451,17 @@ def event_details(event_id: int, max_age_hours: float | None = 12) -> dict | Non
 
 
 def h2h_events(event_id: int) -> list[dict]:
-    """Previous meetings between the two teams in this fixture."""
+    """Dead endpoint. Kept only so its absence is documented, not repeated.
+
+    SofaScore removed event/{id}/h2h/events. It returned 404 for all 87
+    fixtures of the 1 September 2026 run, which is why the report's Head to
+    head button stayed disabled for days while the flag, the config and the
+    payload were all correct. Nothing calls this now: hitrates.head_to_head
+    derives meetings from the two clubs' own match feeds instead, which costs
+    no extra request and cannot be taken away.
+
+    If you are tempted to wire it back in, check it returns something first.
+    """
     data = get_json(f"event/{event_id}/h2h/events", max_age_hours=168)
     return (data or {}).get("events", [])
 

@@ -830,6 +830,29 @@ def referee_card_rates(event_details: dict | None) -> dict | None:
     return out
 
 
+def api_meetings(
+    home_id: int,
+    away_id: int,
+    before: float | None = None,
+) -> list[dict]:
+    """Matches between these two clubs, from the home side's own feed.
+
+    Returns raw events rather than records, so head_to_head keeps ownership of
+    the filtering and the as-of guard that follows it.
+    """
+    both = {away_id}
+    found = []
+    for event in collect_events(home_id, tournament_id=None, verbose=False,
+                                before=before):
+        sides = {
+            (event.get("homeTeam") or {}).get("id"),
+            (event.get("awayTeam") or {}).get("id"),
+        }
+        if sides & both:
+            found.append(event)
+    return found
+
+
 def head_to_head(
     event_id: int,
     home_id: int,
@@ -851,7 +874,23 @@ def head_to_head(
     The live path passes the fixture's own kickoff; a backtest would pass
     the moment it is pretending to stand at.
     """
-    events = api.h2h_events(event_id)
+    # Derived from the two clubs' own match feeds, not from a head-to-head
+    # endpoint.
+    #
+    # SofaScore's event/{id}/h2h/events is gone. It returned 404 for all 87
+    # fixtures of the 1 September run, which is why the Head to head button
+    # stayed disabled for days while the flag, the config and the payload
+    # were all correct: the code ran, asked, and was told no.
+    #
+    # Intersecting the home side's history with the away side's id needs no
+    # request at all beyond the feeds team_form already fetches, so this is
+    # both cheaper and immune to that endpoint disappearing again. The limit
+    # is honest rather than hidden: it can only see meetings inside the
+    # window already pulled for form, so two clubs who last met three seasons
+    # ago will show nothing rather than something stale.
+    events = [
+        e for e in api_meetings(home_id, away_id, before=before)
+    ]
 
     # Guard against reading the future. This feed is "meetings between these
     # two clubs", not "meetings before this one", and the difference only
